@@ -21,3 +21,4 @@ test_results/base_test.*
 # Python compiled bytecode files #
 ######################
 *.pyc
+src/nlchain_test

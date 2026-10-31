@@ -294,6 +294,7 @@ s64 debugClockTotal = 0,
     debugClockQueryTotal = 0,
     debugClockSegTable = 0,
     debugClockChaining = 0,
+    debugClockNlChaining = 0,
     debugClockGappedExtend = 0,
     debugClockInterpolation = 0,
     debugClockOutput = 0;
@@ -378,6 +379,20 @@ static const control defaultParams =
 	gfexXDrop,							// gfExtend
 	false,								// mergeAnchors
 	false,0,0,							// chain, chainDiag, chainAnti
+	false,								// nlchain
+	{ &nlGapCostMedium,					// nl: gapCost (§8.3 初值)
+	  0,								//     antiPen R
+	  50000,10000,						//     maxGap, maxDiag
+	  0.5,								//     overlapFrac f_ov
+	  -1,								//     jumpPen J (-1 => hspthresh)
+	  500,1000,8,						//     spanCoef λ, spanScale D0, spanCap L
+	  -1,								//     soloScore T_solo (-1 => 2*hspthresh)
+	  0,								//     minSourceSupport T_src (0 => 关闭)
+	  1000,								//     maxJumpScan H_max
+	  -1,5,0.5 },						//     secondaryScore T_sec (-1 => 2*hspthresh),
+										//     .. secondaryPerRegion N_sec,
+										//     .. secondaryRatio r_sec
+	NULL,NULL,							// nlReportFile, nlReportFilename
 	true,								// gappedExtend
 
 	NULL,NULL,							// scoring, maskedScoring
@@ -711,6 +726,7 @@ int main
 	seed_search_zero_stats   ();
 	quantum_zero_stats       ();
 	chain_zero_stats         ();
+	nlchain_zero_stats       ();
 	gapped_extend_zero_stats ();
 	tweener_zero_stats       ();
 	masking_zero_stats       ();
@@ -744,6 +760,16 @@ int main
 
 	if (currParams->showStats)
 		statsF = (currParams->statsFile != NULL)? currParams->statsFile : stderr;
+
+	// open nlchain segment report file
+
+	if (currParams->nlReportFilename != NULL)
+		{
+		currParams->nlReportFile = fopen_or_die (currParams->nlReportFilename, "wt");
+		free_if_valid ("nlchain report file name", currParams->nlReportFilename);
+		currParams->nlReportFilename = NULL;
+		nl_write_report_header (currParams->nlReportFile);
+		}
 
 	if ((currParams->inferScores) && (statsF != NULL))
 		izParams.statsFile = statsF;
@@ -1069,6 +1095,8 @@ next_target:
 			suicidef ("can't use [chores] with --infer[only]\n");
 		if ((applyChore) && (currParams->anchorsFile != NULL))
 			suicidef ("can't use [chores] with --segments\n");
+		if ((applyChore) && (currParams->nlchain))
+			suicidef ("can't use [chores] with --nlchain\n");
 
 		if (currParams->choresFilename != NULL)
 			{ // (choresFilename has been copied into query->choresFilename by open_sequence_file)
@@ -1425,7 +1453,8 @@ next_target:
 	hspsAreAdaptive = (currParams->hspThreshold.t != 'S');
 	collectHspsFromBoth = hspsAreAdaptive
 	                   || (currParams->searchLimit > 0)
-	                   || (currParams->numBestHsps > 0);
+	                   || (currParams->numBestHsps > 0)
+	                   || (currParams->nlchain);
 
 	collectHspsSeparately = false;
 	if (collectHspsFromBoth)
@@ -1433,6 +1462,7 @@ next_target:
 		collectHspsSeparately = true;
 		if (hspsAreAdaptive)             collectHspsSeparately = false;
 		if (currParams->numBestHsps > 0) collectHspsSeparately = false;
+		if (currParams->nlchain)         collectHspsSeparately = false;
 		}
 
 	if ((collectHspsFromBoth) && (secondaryAnchors == NULL))
@@ -1678,6 +1708,9 @@ next_target:
 				split_anchors (query->revCompFlags);	//    - strand kept in anchors;
 														// .. + strand moved to secondary anchors
 
+			if (currParams->nlchain)
+				nlchain_both_strands (target, query);
+
 			finish_one_strand (target, targetRev, targPositions, query, NULL,
 							   traceback, targCensus);
 
@@ -1813,6 +1846,8 @@ next_target:
 		if (query->fileType == seq_type_qdna)
 			quantum_generic_stats   (currParams->outputFile, print_generic);
 		chain_generic_stats         (currParams->outputFile, print_generic);
+		if (currParams->nlchain)
+			nlchain_generic_stats   (currParams->outputFile, print_generic);
 		gapped_extend_generic_stats (currParams->outputFile, print_generic);
 		if (currParams->innerSeed != NULL)
 			tweener_generic_stats   (currParams->outputFile, print_generic);
@@ -1849,6 +1884,7 @@ show_stats_and_clean_up:
 	if ((query != NULL) && (query->fileType == seq_type_qdna))
 		quantum_show_stats   (statsF);
 	chain_show_stats         (statsF);
+	nlchain_show_stats       (statsF);
 	gapped_extend_show_stats (statsF);
 	if (currParams->innerSeed != NULL)
 		tweener_show_stats (statsF);
@@ -1991,6 +2027,7 @@ show_stats_and_clean_up:
 	fclose_if_valid      (lzParams.softMaskedFile);                              lzParams.softMaskedFile     = NULL;
 	free_if_valid        ("lz.softMaskedFilename", lzParams.softMaskedFilename); lzParams.softMaskedFilename = NULL;
 	fclose_if_valid      (lzParams.censusFile);                                  lzParams.censusFile         = NULL;
+	fclose_if_valid      (lzParams.nlReportFile);                                lzParams.nlReportFile       = NULL;
 	free_if_valid        ("lz.censusFilename",     lzParams.censusFilename);     lzParams.censusFilename     = NULL;
 	fclose_if_valid      (lzParams.statsFile);                                   lzParams.statsFile          = NULL;
 	free_seed_hit_search ();
@@ -2014,6 +2051,8 @@ show_stats_and_clean_up:
 	dbg_timing_report (debugClockSeq2,          "sequence 2 I/O");
 	dbg_timing_report (debugClockSegTable,      "seed hit search");
 	dbg_timing_report (debugClockChaining,      "chaining");
+	if (currParams->nlchain)
+		dbg_timing_report (debugClockNlChaining, "nlchaining");
 	dbg_timing_report (debugClockGappedExtend,  "gapped extension");
 	dbg_timing_report (debugClockInterpolation, "interpolation");
 	dbg_timing_report (debugClockOutput,        "output");
@@ -2832,6 +2871,7 @@ void set_up_hit_processor
 	  && (params->searchLimit == 0)		// (no limit on
 	  && (params->numBestHsps == 0)		//        .. number of HSPs)
 	  && (!params->chain)				// (not chaining)
+	  && (!params->nlchain)				// (not non-linear chaining)
 	  && (!params->gappedExtend)		// (not doing gapped extension)
 	  && (!params->mergeAnchors)
 #ifdef densityFiltering
@@ -3638,6 +3678,85 @@ void split_anchors (int id)
 
 void swap_anchor_sets (void)
 	{ segtable* a = secondaryAnchors;  secondaryAnchors = anchors;  anchors = a; }
+
+//----------
+//
+// nlchain_both_strands--
+//	非线性串联（docs/nlchain_design.md §8.2 第 5 条）。调用时两条链的 HSP 已由
+//	split_anchors 拆开：反链在 anchors，正链在 secondaryAnchors。query 此时处于
+//	反向互补状态，但 nlchain 只用坐标和已有分数，不读序列。返回后两张表只剩
+//	主路径和次级链的 HSP，之后照常各自 finish_one_strand。
+//
+//----------
+//
+// Arguments:
+//	seq*	target:	The target sequence.
+//	seq*	query:	The query sequence.
+//
+// Returns:
+//  (nothing)
+//
+//----------
+
+void nlchain_both_strands
+   (seq*			target,
+	seq*			query)
+	{
+	nlchainparams	nl = currParams->nl;
+	nlchainresult	result = { 0, 0, NULL };
+	segtable*		tables[2];
+	score			hspThresh;
+	u32				originalNumAnchors, t, ix;
+	int				haveAny;
+
+	tables[0] = anchors;
+	tables[1] = secondaryAnchors;
+	originalNumAnchors = anchors->len + secondaryAnchors->len;
+
+	if ((originalNumAnchors > 0) && (!anchors->haveScores))
+		suicide ("internal error, --nlchain requires scored HSPs");
+
+	// hspthresh 相关的默认值（§8.3）；自适应 hspthresh 时用本次收集到的最低
+	// HSP 分（merge 之前，与 finish_one_strand 的 lowAnchorScore 口径相同）
+
+	if (currParams->hspThreshold.t == 'S')
+		hspThresh = currParams->hspThreshold.s;
+	else
+		{
+		hspThresh = 0;
+		haveAny   = false;
+		for (t=0 ; t<2 ; t++)
+			for (ix=0 ; ix<tables[t]->len ; ix++)
+				{
+				if ((!haveAny) || (tables[t]->seg[ix].s < hspThresh))
+					hspThresh = tables[t]->seg[ix].s;
+				haveAny = true;
+				}
+		}
+
+	if (nl.jumpPen        < 0) nl.jumpPen        = hspThresh;
+	if (nl.soloScore      < 0) nl.soloScore      = 2 * hspThresh;
+	if (nl.secondaryScore < 0) nl.secondaryScore = 2 * hspThresh;
+
+	// 两张表分别 merge；不能对双链合表 merge（§2）
+
+	if (currParams->mergeAnchors)
+		{
+		merge_segments (anchors);
+		merge_segments (secondaryAnchors);
+		}
+
+	dbg_timing_sub      (debugClockNlChaining);
+	nl_reduce_to_chains (target, query, anchors, secondaryAnchors, &nl, &result);
+	dbg_timing_add      (debugClockNlChaining);
+
+	if (dbgShowAnchors)
+		fprintf (stderr, "(nlchaining reduced %u anchors to %u)\n",
+		                 originalNumAnchors, anchors->len + secondaryAnchors->len);
+
+	nl_write_report (currParams->nlReportFile, target, query, &result);
+	nl_free_result  (&result);
+	}
 
 //----------
 // [[-- a chain connection penalty function --]]
@@ -5348,6 +5467,7 @@ char*	firstSpecialSub;
 score	specialSubScores[4][4];
 int		formatIsSegments;
 int		formatIsDotPlot;
+int		haveNlchainOption;
 
 static void parse_options_loop   (int argc, char** argv,
                                   control* lzParams, control* izParams,
@@ -5359,6 +5479,41 @@ static void parse_options_string (char* s,
 
 static void parse_options_file   (char* filename,
                                   control* lzParams, control* izParams);
+
+// split_nlchain_fields--
+//	把 --nlchainxxx=<a>[,<b>...] 的值按逗号拆开；返回的指针指向内部静态缓冲，
+//	下次调用前有效。
+
+static int split_nlchain_fields
+   (const char*	s,
+	char**		fields,
+	int			maxFields,
+	int			minFields)
+	{
+	static char	buf[200];
+	char*		scan;
+	int			numFields;
+
+	if (strlen (s) >= sizeof(buf))
+		chastise ("option value is too long (\"%s\")\n", s);
+	strcpy (buf, s);
+
+	numFields = 0;
+	scan      = buf;
+	while (true)
+		{
+		if (numFields >= maxFields)
+			chastise ("too many comma-separated values in \"%s\"\n", s);
+		fields[numFields++] = scan;
+		scan = strchr (scan, ',');
+		if (scan == NULL) break;
+		*(scan++) = 0;
+		}
+
+	if (numFields < minFields)
+		chastise ("too few comma-separated values in \"%s\"\n", s);
+	return numFields;
+	}
 
 
 // parse_options_loop-- main options parsing loop;  it is separate from the
@@ -5392,6 +5547,8 @@ static void parse_options_loop
 	float		minContinuity, maxContinuity;
 	int			r, c;
 	int			argIsAMatch, charsUsed, tempInt;
+	int			numFields;
+	char*		fields[4];
 	score		tempScore, tempScore2;
 	char*		expVersion, *argVersion;
 	int			expLen;
@@ -5921,6 +6078,119 @@ static void parse_options_loop
 		if (strcmp_prefix (arg, "R=") == 0)
 			{
 			lzParams->chainAnti = string_to_score (argStr);
+			goto next_arg;
+			}
+
+		// --nlchain and its parameters (docs/nlchain_design.md §8.2)
+
+		if (strcmp (arg, "--nlchain") == 0)
+			{ lzParams->nlchain = true;  goto next_arg; }
+
+		if (strcmp_prefix (arg, "--nlchainjump=") == 0)
+			{
+			numFields = split_nlchain_fields (argStr, fields, 4, 1);
+			lzParams->nl.jumpPen = string_to_score (fields[0]);
+			if (numFields > 1) lzParams->nl.spanCoef  = string_to_score  (fields[1]);
+			if (numFields > 2)
+				{
+				tempInt = string_to_unitized_int (fields[2], true);
+				if (tempInt <= 0)
+					chastise ("D0 in --nlchainjump must be positive\n");
+				lzParams->nl.spanScale = tempInt;
+				}
+			if (numFields > 3) lzParams->nl.spanCap   = string_to_double (fields[3]);
+			if ((lzParams->nl.jumpPen < 0) || (lzParams->nl.spanCoef < 0)
+			 || (lzParams->nl.spanCap < 0))
+				chastise ("--nlchainjump values can't be negative\n");
+			haveNlchainOption = true;
+			goto next_arg;
+			}
+
+		if (strcmp_prefix (arg, "--nlchaingap=") == 0)
+			{
+			numFields = split_nlchain_fields (argStr, fields, 3, 2);
+			tempInt = string_to_unitized_int (fields[0], true);
+			if (tempInt < 0) chastise ("--nlchaingap values can't be negative\n");
+			lzParams->nl.maxGap = tempInt;
+			tempInt = string_to_unitized_int (fields[1], true);
+			if (tempInt < 0) chastise ("--nlchaingap values can't be negative\n");
+			lzParams->nl.maxDiag = tempInt;
+			if (numFields > 2) lzParams->nl.antiPen = string_to_double (fields[2]);
+			if (lzParams->nl.antiPen < 0)
+				chastise ("--nlchaingap values can't be negative\n");
+			haveNlchainOption = true;
+			goto next_arg;
+			}
+
+		if (strcmp_prefix (arg, "--nlchaingapcost=") == 0)
+			{
+			if      (strcmp (argStr, "medium") == 0) lzParams->nl.gapCost = &nlGapCostMedium;
+			else if (strcmp (argStr, "loose")  == 0) lzParams->nl.gapCost = &nlGapCostLoose;
+			else chastise ("--nlchaingapcost must be medium or loose (not \"%s\")\n", argStr);
+			haveNlchainOption = true;
+			goto next_arg;
+			}
+
+		if (strcmp_prefix (arg, "--nlchainsolo=") == 0)
+			{
+			lzParams->nl.soloScore = string_to_score (argStr);
+			if (lzParams->nl.soloScore < 0)
+				chastise ("--nlchainsolo can't be negative\n");
+			haveNlchainOption = true;
+			goto next_arg;
+			}
+
+		if (strcmp_prefix (arg, "--nlchainsource=") == 0)
+			{
+			lzParams->nl.minSourceSupport = string_to_score (argStr);
+			if (lzParams->nl.minSourceSupport < 0)
+				chastise ("--nlchainsource can't be negative\n");
+			haveNlchainOption = true;
+			goto next_arg;
+			}
+
+		if (strcmp_prefix (arg, "--nlchainoverlap=") == 0)
+			{
+			lzParams->nl.overlapFrac = string_to_double (argStr);
+			if ((lzParams->nl.overlapFrac < 0) || (lzParams->nl.overlapFrac > 1))
+				chastise ("--nlchainoverlap must be between 0 and 1\n");
+			haveNlchainOption = true;
+			goto next_arg;
+			}
+
+		if (strcmp_prefix (arg, "--nlchainscan=") == 0)
+			{
+			tempInt = string_to_unitized_int (argStr, true);
+			if (tempInt <= 0)
+				chastise ("--nlchainscan must be positive\n");
+			lzParams->nl.maxJumpScan = tempInt;
+			haveNlchainOption = true;
+			goto next_arg;
+			}
+
+		if (strcmp_prefix (arg, "--nlchainsecondary=") == 0)
+			{
+			numFields = split_nlchain_fields (argStr, fields, 3, 1);
+			lzParams->nl.secondaryScore = string_to_score (fields[0]);
+			if (numFields > 1)
+				{
+				tempInt = string_to_int (fields[1]);
+				if (tempInt <= 0)
+					chastise ("N_sec in --nlchainsecondary must be positive\n");
+				lzParams->nl.secondaryPerRegion = tempInt;
+				}
+			if (numFields > 2) lzParams->nl.secondaryRatio = string_to_double (fields[2]);
+			if ((lzParams->nl.secondaryScore < 0) || (lzParams->nl.secondaryRatio < 0))
+				chastise ("--nlchainsecondary values can't be negative\n");
+			haveNlchainOption = true;
+			goto next_arg;
+			}
+
+		if (strcmp_prefix (arg, "--nlchainreport=") == 0)
+			{
+			if (lzParams->nlReportFilename != NULL) goto duplicated_option;
+			lzParams->nlReportFilename = copy_string (argStr);
+			haveNlchainOption = true;
 			goto next_arg;
 			}
 
@@ -8510,6 +8780,7 @@ static void parse_options
 	haveXDrop             = false;
 	haveYDrop             = false;
 	haveStep              = false;
+	haveNlchainOption     = false;
 	haveGappedOption      = false;
 	haveHspThreshold      = false;
 	haveGappedThreshold   = false;
@@ -9031,6 +9302,25 @@ static void parse_options
 		{
 		if (lzParams->anchorsFilename != NULL)
 			chastise ("--segments can't be used with --chain\n");
+		}
+
+	if ((haveNlchainOption) && (!lzParams->nlchain))
+		chastise ("--nlchainjump, --nlchaingap, etc. require --nlchain\n");
+
+	if (lzParams->nlchain)
+		{
+		if (lzParams->chain)
+			chastise ("--nlchain can't be used with --chain\n");
+		if (lzParams->anchorsFilename != NULL)
+			chastise ("--nlchain can't be used with --segments\n");
+		if (lzParams->hspImmediate)
+			chastise ("--nlchain can't be used with --anyornone or --limitperquery\n");
+		if (lzParams->whichStrand <= 0)
+			chastise ("--nlchain requires both strands (it can't be used with --strand=plus or --strand=minus)\n");
+		if (lzParams->choresFilename != NULL)
+			chastise ("--nlchain can't be used with --chores\n");
+		if (lzParams->gfExtend == gfexNoExtend)
+			chastise ("--nlchain requires scored HSPs (it can't be used with --nogfextend)\n");
 		}
 
 	if (!lzParams->gappedExtend)

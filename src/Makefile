@@ -78,7 +78,7 @@ CFLAGS += -O3 ${definedForAll} ${VERSION_FLAGS}
 
 srcFiles = lastz infer_scores \
            seeds pos_table quantum seed_search diag_hash                  \
-           chain gapped_extend tweener masking                            \
+           chain nlchain gapped_extend tweener masking                    \
            segment edit_script                                            \
            identity_dist coverage_dist continuity_dist                    \
            output gfa lav axt maf cigar sam genpaf text_align align_diffs \
@@ -86,7 +86,7 @@ srcFiles = lastz infer_scores \
 
 incFiles = lastz.h infer_scores.h \
            seeds.h pos_table.h quantum.h seed_search.h diag_hash.h                            \
-           chain.h gapped_extend.h tweener.h masking.h                                        \
+           chain.h nlchain.h gapped_extend.h tweener.h masking.h                              \
            segment.h edit_script.h                                                            \
            identity_dist.h coverage_dist.h continuity_dist.h                                  \
            output.h gfa.h lav.h axt.h maf.h sam.h cigar.h genpaf.h text_align.h align_diffs.h \
@@ -129,6 +129,7 @@ clean_builds:
 	rm -f lastz_D
 	rm -f lastz_32
 	rm -f lastz_40
+	rm -f nlchain_test
 
 # installation;  change installDir to suit your needs (in ../make-include.mak)
 
@@ -194,6 +195,15 @@ install_40: lastz_40
 #	base_test_multi				multi-sequence file
 #	base_test_multi_subrange	multi-sequence file with subranges
 #---------
+
+# nlchain 单元测试（docs/nlchain_design.md §9 第 1 步）；nlchain_test.c 直接
+# 包含 nlchain.c，只需链接它用到的模块
+
+nlchainTestObjs = utilities.o dna_utilities.o sequences.o segment.o
+
+nlchain_test: nlchain_test.c nlchain.c ${nlchainTestObjs} version.mak ${incFiles}
+	${CC} ${CPPFLAGS} ${CFLAGS} -Dscore_type=I nlchain_test.c ${nlchainTestObjs} -lm -o $@
+	./nlchain_test
 
 lavCompare = ../tools/lav_compare.py
 gfaCompare = ../tools/gfa_compare.py

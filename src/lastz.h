@@ -17,6 +17,7 @@
 #include "gapped_extend.h"		// gapped alignment stuff
 #include "masking.h"			// dynamic masking stuff
 #include "diag_hash.h"			// diagonals hashing stuff
+#include "nlchain.h"			// non-linear chaining stuff
 
 // establish ownership of global variables
 
@@ -195,6 +196,12 @@ typedef struct control
 	int			chain;			// (I) true => perform chaining
 	score		chainDiag;		// (I) diagonal chaining penalty
 	score		chainAnti;		// (I) antidiagonal chaining penalty
+	int			nlchain;		// (I) true => 非线性串联（docs/nlchain_design.md）
+	nlchainparams nl;			// (I) 非线性串联参数；jumpPen、soloScore、
+								//     .. secondaryScore 为 -1 表示按 hspthresh
+								//     .. 取默认值（§8.3）
+	FILE*		nlReportFile;	//     段表 TSV 文件（可为 NULL）
+	char*		nlReportFilename;//    段表 TSV 文件名（可为 NULL）
 	int			gappedExtend;	// (I) true => perform gapped extension
 
 	scoreset*	scoring;		// (I) scoring set
@@ -504,6 +511,7 @@ void finish_one_strand    (seq* target, u8* targetRev,
                            tback* traceback, census* targCensus);
 void split_anchors        (int id);
 void swap_anchor_sets     (void);
+void nlchain_both_strands (seq* target, seq* query);
 
 //----------
 //
