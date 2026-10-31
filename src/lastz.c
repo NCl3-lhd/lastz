@@ -2052,7 +2052,7 @@ show_stats_and_clean_up:
 	dbg_timing_report (debugClockSegTable,      "seed hit search");
 	dbg_timing_report (debugClockChaining,      "chaining");
 	if (currParams->nlchain)
-		dbg_timing_report (debugClockNlChaining, "nlchaining");
+		{ dbg_timing_report (debugClockNlChaining, "nlchaining"); }
 	dbg_timing_report (debugClockGappedExtend,  "gapped extension");
 	dbg_timing_report (debugClockInterpolation, "interpolation");
 	dbg_timing_report (debugClockOutput,        "output");
