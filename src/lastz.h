@@ -18,6 +18,7 @@
 #include "masking.h"			// dynamic masking stuff
 #include "diag_hash.h"			// diagonals hashing stuff
 #include "nlchain.h"			// non-linear chaining stuff
+#include "nlrechain.h"			// nlchain 的 gapped 后重新串链
 
 // establish ownership of global variables
 
@@ -202,6 +203,10 @@ typedef struct control
 								//     .. （§8.3）
 	FILE*		nlReportFile;	//     段表 TSV 文件（可为 NULL）
 	char*		nlReportFilename;//    段表 TSV 文件名（可为 NULL）
+	nlrechainparams nlr;		// (I) gapped 后重新串链的参数
+								//     .. （docs/nlchain_rechain_plan.md）；
+								//     .. minChainScore = 0 表示关闭
+	char*		nlrReportFilename;//   剥链结果文件名（可为 NULL）
 	int			gappedExtend;	// (I) true => perform gapped extension
 
 	scoreset*	scoring;		// (I) scoring set

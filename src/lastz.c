@@ -295,6 +295,7 @@ s64 debugClockTotal = 0,
     debugClockSegTable = 0,
     debugClockChaining = 0,
     debugClockNlChaining = 0,
+    debugClockNlRechain = 0,
     debugClockGappedExtend = 0,
     debugClockInterpolation = 0,
     debugClockOutput = 0;
@@ -393,6 +394,10 @@ static const control defaultParams =
 										//     .. secondaryPerRegion N_sec,
 										//     .. secondaryRatio r_sec
 	NULL,NULL,							// nlReportFile, nlReportFilename
+	{ &nlrGapCostMedium,				// nlr: gapCost（跟随 --nlchaingapcost）
+	  5000,								//      minChainScore T_chain (0 => 关闭)
+	  NULL },							//      reportFile
+	NULL,								// nlrReportFilename
 	true,								// gappedExtend
 
 	NULL,NULL,							// scoring, maskedScoring
@@ -727,6 +732,7 @@ int main
 	quantum_zero_stats       ();
 	chain_zero_stats         ();
 	nlchain_zero_stats       ();
+	nlrechain_zero_stats     ();
 	gapped_extend_zero_stats ();
 	tweener_zero_stats       ();
 	masking_zero_stats       ();
@@ -769,6 +775,15 @@ int main
 		free_if_valid ("nlchain report file name", currParams->nlReportFilename);
 		currParams->nlReportFilename = NULL;
 		nl_write_report_header (currParams->nlReportFile);
+		}
+
+	// open nlchain rechain report file
+
+	if (currParams->nlrReportFilename != NULL)
+		{
+		currParams->nlr.reportFile = fopen_or_die (currParams->nlrReportFilename, "wt");
+		free_if_valid ("nlchain clean report file name", currParams->nlrReportFilename);
+		currParams->nlrReportFilename = NULL;
 		}
 
 	if ((currParams->inferScores) && (statsF != NULL))
@@ -1847,7 +1862,10 @@ next_target:
 			quantum_generic_stats   (currParams->outputFile, print_generic);
 		chain_generic_stats         (currParams->outputFile, print_generic);
 		if (currParams->nlchain)
+			{
 			nlchain_generic_stats   (currParams->outputFile, print_generic);
+			nlrechain_generic_stats (currParams->outputFile, print_generic);
+			}
 		gapped_extend_generic_stats (currParams->outputFile, print_generic);
 		if (currParams->innerSeed != NULL)
 			tweener_generic_stats   (currParams->outputFile, print_generic);
@@ -1885,6 +1903,7 @@ show_stats_and_clean_up:
 		quantum_show_stats   (statsF);
 	chain_show_stats         (statsF);
 	nlchain_show_stats       (statsF);
+	nlrechain_show_stats     (statsF);
 	gapped_extend_show_stats (statsF);
 	if (currParams->innerSeed != NULL)
 		tweener_show_stats (statsF);
@@ -2028,6 +2047,7 @@ show_stats_and_clean_up:
 	free_if_valid        ("lz.softMaskedFilename", lzParams.softMaskedFilename); lzParams.softMaskedFilename = NULL;
 	fclose_if_valid      (lzParams.censusFile);                                  lzParams.censusFile         = NULL;
 	fclose_if_valid      (lzParams.nlReportFile);                                lzParams.nlReportFile       = NULL;
+	fclose_if_valid      (lzParams.nlr.reportFile);                              lzParams.nlr.reportFile     = NULL;
 	free_if_valid        ("lz.censusFilename",     lzParams.censusFilename);     lzParams.censusFilename     = NULL;
 	fclose_if_valid      (lzParams.statsFile);                                   lzParams.statsFile          = NULL;
 	free_seed_hit_search ();
@@ -2052,7 +2072,10 @@ show_stats_and_clean_up:
 	dbg_timing_report (debugClockSegTable,      "seed hit search");
 	dbg_timing_report (debugClockChaining,      "chaining");
 	if (currParams->nlchain)
-		{ dbg_timing_report (debugClockNlChaining, "nlchaining"); }
+		{
+		dbg_timing_report (debugClockNlChaining, "nlchaining");
+		dbg_timing_report (debugClockNlRechain,  "nlchain rechaining");
+		}
 	dbg_timing_report (debugClockGappedExtend,  "gapped extension");
 	dbg_timing_report (debugClockInterpolation, "interpolation");
 	dbg_timing_report (debugClockOutput,        "output");
@@ -3505,6 +3528,17 @@ void finish_one_strand
 		if (currParams->maxGapColumnsCount >= 0)
 			alignList = filter_aligns_by_num_gap_columns
 			              (alignList, currParams->maxGapColumnsCount);
+		}
+
+	// nlchain：gapped 之后按无 gap 块重新串链，删掉链分低于 T_chain 的链
+	// （docs/nlchain_rechain_plan.md）
+
+	if ((alignList != NULL) && (currParams->nlchain) && (currParams->nlr.minChainScore > 0))
+		{
+		dbg_timing_sub (debugClockNlRechain);
+		alignList = nl_rechain_aligns (target, query, currParams->scoring,
+		                               alignList, &currParams->nlr);
+		dbg_timing_add (debugClockNlRechain);
 		}
 
 	// interpolate between the gapped alignments
@@ -5467,6 +5501,7 @@ score	specialSubScores[4][4];
 int		formatIsSegments;
 int		formatIsDotPlot;
 int		haveNlchainOption;
+int		haveNlchainClean;
 
 static void parse_options_loop   (int argc, char** argv,
                                   control* lzParams, control* izParams,
@@ -6123,8 +6158,10 @@ static void parse_options_loop
 
 		if (strcmp_prefix (arg, "--nlchaingapcost=") == 0)
 			{
-			if      (strcmp (argStr, "medium") == 0) lzParams->nl.gapCost = &nlGapCostMedium;
-			else if (strcmp (argStr, "loose")  == 0) lzParams->nl.gapCost = &nlGapCostLoose;
+			if      (strcmp (argStr, "medium") == 0)
+				{ lzParams->nl.gapCost = &nlGapCostMedium;  lzParams->nlr.gapCost = &nlrGapCostMedium; }
+			else if (strcmp (argStr, "loose")  == 0)
+				{ lzParams->nl.gapCost = &nlGapCostLoose;   lzParams->nlr.gapCost = &nlrGapCostLoose;  }
 			else chastise ("--nlchaingapcost must be medium or loose (not \"%s\")\n", argStr);
 			haveNlchainOption = true;
 			goto next_arg;
@@ -6181,6 +6218,25 @@ static void parse_options_loop
 			if (numFields > 2) lzParams->nl.secondaryRatio = string_to_double (fields[2]);
 			if ((lzParams->nl.secondaryScore < 0) || (lzParams->nl.secondaryRatio < 0))
 				chastise ("--nlchainsecondary values can't be negative\n");
+			haveNlchainOption = true;
+			goto next_arg;
+			}
+
+		if (strcmp_prefix (arg, "--nlchainclean=") == 0)
+			{
+			lzParams->nlr.minChainScore = string_to_score (argStr);
+			if (lzParams->nlr.minChainScore < 0)
+				chastise ("--nlchainclean can't be negative\n");
+			haveNlchainClean  = true;
+			haveNlchainOption = true;
+			goto next_arg;
+			}
+
+		if (strcmp_prefix (arg, "--nlchaincleanreport=") == 0)
+			{
+			if (lzParams->nlrReportFilename != NULL) goto duplicated_option;
+			lzParams->nlrReportFilename = copy_string (argStr);
+			haveNlchainClean  = true;
 			haveNlchainOption = true;
 			goto next_arg;
 			}
@@ -8780,6 +8836,7 @@ static void parse_options
 	haveYDrop             = false;
 	haveStep              = false;
 	haveNlchainOption     = false;
+	haveNlchainClean      = false;
 	haveGappedOption      = false;
 	haveHspThreshold      = false;
 	haveGappedThreshold   = false;
@@ -9320,6 +9377,8 @@ static void parse_options
 			chastise ("--nlchain can't be used with --chores\n");
 		if (lzParams->gfExtend == gfexNoExtend)
 			chastise ("--nlchain requires scored HSPs (it can't be used with --nogfextend)\n");
+		if ((haveNlchainClean) && (!lzParams->gappedExtend))
+			chastise ("--nlchainclean and --nlchaincleanreport require gapped extension (they can't be used with --nogapped)\n");
 		}
 
 	if (!lzParams->gappedExtend)

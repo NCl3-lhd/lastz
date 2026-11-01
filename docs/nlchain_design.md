@@ -234,6 +234,7 @@ cand(j,i) = R[j] + s_i - P_J(j,i) ≤ R[j] + s_i - J
 5. **筛 HSP**：主路径和保留的次级链上的 HSP `filter=false`，其余 `filter=true`，调用 `filter_marked_segments`。
 6. **两条链各自 gapped**：两张表在 DP 之前已经拆开（§8.2 第 5 步），DP 后直接沿用现有流程：反链表在 `anchors`、正链表在 `secondaryAnchors`，先对反链调用 `finish_one_strand`，`swap_anchor_sets` 后再对正链调用（`reduce_to_points` → `gapped_extend` → 过滤 → 输出）。`finish_one_strand` 里会再做一次 `merge_segments`，对已合并的单链表无副作用。nlchain 打开时 `finish_one_strand` 不进入自身的 `try_reduce_to_chain`（两者互斥）。
 7. **（可选）段表输出**：`--nlchainreport=<file>` 写出 TSV（primary/secondary、链号、段号、jumpIn、p、σ、q/t 区间、段分数、HSP 数），用于诊断、断点分析，以及按主链/全部链分别评测。
+8. **gapped 之后重新串链（方案 A，2026-11-02）**：每次 `finish_one_strand` 中 gapped 比对过滤之后、插值和输出之前，把该链方向的比对拆成无 gap 块，按 axtChain 的模型重新串链，删掉链分低于 T_chain（`--nlchainclean`，默认 5000）的链，再在被删处切开原比对输出。实现在 `src/nlrechain.c`，算法见 `docs/nlchain_rechain_plan.md` §2，实现记录见 `docs/nlchain_progress.md` §9。
 
 **已知问题，待定**：gapped 延伸从断点两侧的段各自出发，y-drop 可能越过断点，相邻块在 query 上出现重叠。候选处理方式：按段的 query 区间（加一个边距）裁剪输出，或者在输出前后处理。是否需要处理，等 §9 第 3 步看到实际重叠量再定。
 
@@ -342,6 +343,7 @@ typedef struct nlstate			// 一个 HSP 的全部 DP 状态
 6. `finish_one_strand` 中 `if (currParams->chain)` 不变，nlchain 时不进入。
 7. `--stats`：增加 HSP 数、主路径段数、各类 jumpIn 计数、次级链数及其 HSP 数、H_max 截断次数、DP 用时（`dbg_timing` 新增 `debugClockNlChaining`）。
 8. 不加 `--nlchain` 时，代码路径与现在完全一致，输出逐字节不变。
+9. （方案 A，2026-11-02）`lastzParams` 增加 `nlrechainparams nlr` 和 `nlrReportFilename`；CLI 增加 `--nlchainclean=<T_chain>`、`--nlchaincleanreport=<file>`；`--nlchaingapcost` 同时选重新串链的三行代价表；`finish_one_strand` 在过滤之后调用 `nl_rechain_aligns`（`T_chain > 0` 时）。`--nlchainclean=0` 时输出与此前的 nlchain 逐字节一致。
 
 ### 8.3 默认值（已在 Alignathon simTest 上调定，2026-11-01）
 

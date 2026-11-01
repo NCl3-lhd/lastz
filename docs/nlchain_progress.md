@@ -1,6 +1,8 @@
 # nlchain 实现进展
 
-日期：2026-11-01。对应设计：`docs/nlchain_design.md`（下文 §x.y 均指该文档）。已完成 §9 的第 1–3 步（本地）、第 0 步（远端，结果见 §5）、第 4 步（远端，结果见 §6）和第 5 步的调参部分（远端，结果见 §8，默认值已冻结）；16 个物种对的最终运行尚未做。nlchain 代码已在 `nlchain` 分支提交（fa30eda，gcc 构建修复 7939842，第 4 步结果 5a1684d）；第 5 步的默认值改动和文档更新尚未提交。
+日期：2026-11-01，2026-11-02 更新。对应设计：`docs/nlchain_design.md`（下文 §x.y 均指该文档）。已完成 §9 的第 1–3 步（本地）、第 0 步（远端，结果见 §5）、第 4 步（远端，结果见 §6）和第 5 步的调参部分（远端，结果见 §8，默认值已冻结并在 06533fd 提交）；16 个物种对的最终运行尚未做。nlchain 代码已在 `nlchain` 分支提交（fa30eda，gcc 构建修复 7939842，第 4 步结果 5a1684d，默认值 06533fd）。
+
+**2026-11-02**：方案 A（gapped 之后重新串链 + 链分下限，`docs/nlchain_rechain_plan.md`）的本地实现和验证已完成（实施方案 §4 第 1–6 步），见 §9；尚未提交，远端对拍和评测（第 7–8 步）尚未做。
 
 ## 1. 已完成
 
@@ -25,7 +27,11 @@
 --nlchainscan=<H_max>                     默认 1000
 --nlchainsecondary=<T_sec>[,<N_sec>,<r_sec>]  默认 0, 1, 0.9；T_sec=0 关闭次级链（默认关闭；需要旁系拷贝时推荐 T_sec=4×hspthresh）
 --nlchainreport=<file>                    段表 TSV
+--nlchainclean=<T_chain>                  默认 5000；gapped 后重新串链，删掉链分 < T_chain 的链；0 关闭（§9）
+--nlchaincleanreport=<file>               剥链结果，kent chain 格式（删除前的全部链）
 ```
+
+`--nlchaingapcost` 同时决定重新串链用的 axtChain 代价表（medium / loose 的三行表）。
 
 自适应 hspthresh（`--hspthresh=top...`）下，J、T_solo 中的 hspthresh 取本次两条链收集到的最低 HSP 分（在 merge 之前统计）。
 
@@ -63,7 +69,7 @@
 - **次级链的区域限额检查是 O(k²)**（k 为一个 query 分区内已保留的次级链数）。在 simHuman–simMouse 上，7 条染色体合计 39,230 条次级链，整个 nlchaining 阶段只用 8.7 s，不是问题；真实人类基因组上次级链会更多，届时再看。
 - 默认构建的 `unspos` 只支持 2^31 的序列长度。全基因组 `[multiple]` target（人约 3.1 Gb）要用 `lastz_32` 构建（Alignathon 的 simHuman 只有 191 Mb，不受影响）。
 - ~~次级链按当前默认参数是净负收益~~：第 5 步已改为默认关闭（§8）。
-- **与 chainNet 的 F 差距**（simTest 上 0.012，全量 simHuman–simMouse 上 0.004）调参补不上，主要来自 gapped 延伸越出段边界（§8）。
+- **与 chainNet 的 F 差距**（simTest 上 0.012，全量 simHuman–simMouse 上 0.004）调参补不上。根因已定位：不是越出段边界，而是 nlchain 缺少 chainNet 流程中"gapped 后拆块重新串链、丢掉低分碎片链"这一步，见 `docs/nlchain_precision_gap.md`。
 - §7 的断点重叠：第 4 步量级很小，建议暂不处理（§6）。
 - `README.lastz.html` 和 `lastz --help` 还没有写入新选项（参数已冻结，可以补了）。
 
@@ -184,12 +190,26 @@
 1. **评测口径（已定，2026-10-31）**：第 4 步三方（nlchain、`--chain`、LASTZ+axtChain/chainNet）都用**原始输出**，直接用 mafComparator 在对应真值上评，**不做任何 1:1 后过滤，也不做 netSwap**。理由：无旁系真值是两端 1:1，任何一侧的重复使用都同样算偏差，三方按各自实际输出被扣分，比较是公平的。`maf_1to1.py` 只用于第 0 步估上限，不进入评测流程。第 0 步的数据可以用来解读结果：target 端重复使用大约让 precision 低 2 个百分点。
 2. ~~第 4 步~~：已完成，见 §6。
 3. ~~第 5 步调参~~：已完成，默认值已冻结并写入 `lastz.c`，见 §8。
-4. **提交**：`src/lastz.c`、`src/lastz.h` 的默认值改动，以及 `docs/` 的更新（尚未提交）。
+4. ~~提交默认值改动~~：已在 06533fd 提交。
 5. **第 5 步后半：跑 16 个物种对**。参数按 §8 冻结，不再改动。
    - 运行方式与第 4 步相同（target `[multiple]`，每条 query 染色体一个作业），每个物种对同时跑 LASTZ+chainNet medium/3000 作为对照；
    - 服务器的 `run_nl.sh`、`chainnet.sh`、`eval_nl.sh` 写死了 simMammals 和 simHuman–simMouse，需要按 `run_tune.sh` 的方式参数化，还要接入灵长类集（数据尚未下载）；
    - 近缘物种对没有调过参，结果要单独看。
-6. **候选算法改动**：按段的 query/target 区间裁剪 gapped 输出，用来补与 chainNet 的 precision 差距（§8 结论 3）。这属于算法改动，需要先评估、再决定做不做。
+6. **补 precision 差距**：根因与方案见 `docs/nlchain_precision_gap.md`，实施方案见 `docs/nlchain_rechain_plan.md`。
+   - 原候选"按段的 query/target 区间裁剪"已否定：模拟后 F 下降。
+   - **已确认（2026-11-02）**：方案 A 在 `--nlchain` 下默认开启，即 gapped 之后按无 gap 块重新串链（照搬 axtChain 的算法），删掉链分 < 5000 的链。
+   - 次级链按用途选：只要 1:1 直系同源用默认参数；需要旁系同源加 `--nlchainsecondary=<4h>,1,0.9`。
+   - simTest 上的模拟（10 个物种对平均）：
+
+     | 配置 | F_np | F_anc |
+     |---|---|---|
+     | 默认 + A | 0.7247 | 0.7167 |
+     | 次级链 + A | 0.7208 | 0.7194 |
+     | chainNet | 0.7205 | 0.7191 |
+
+   - ~~编码、单测、本地回归~~：已完成（2026-11-02），见 §9。D1–D6 与补充细节 X1–X6 均按推荐确认。
+   - **下一步**：远端第 7 步（simTest 20 个作业与 axtChain 对拍，保留碱基对 Jaccard ≥ 0.995）和第 8 步（两套配置在两份真值上评测，验收线见实施方案 §4），见 §9.5。
+   - 步骤 5（16 个物种对）建议等方案 A 通过 simTest 复核后再跑。
 7. 补 `README.lastz.html` 和 `lastz --help`。
 
 ## 8. 第 5 步结果：simTest 调参（远端，2026-11-01）
@@ -211,6 +231,78 @@
 2. **主路径参数整体不敏感**：单参数扫描的 F 变化都不超过 ±0.005。maxGap、maxDiag 完全不影响结果。主要取舍在 λ 和 J：跳转越贵，precision 越高、recall 越低。
 3. **与 chainNet 的差距调参补不上**：F_np 0.7085 对 0.7205，recall 相同，差距全在 precision，10 个物种对都是这样。
    - 诊断：两边都做两端 1:1 过滤后，precision 差距只从 0.026 缩到 0.021，碱基重复使用只解释了约 1/5。
-   - 其余部分最可能来自 gapped 延伸越出段边界（第 4 步测得 35% 的块越界）。
+   - 其余部分当时推测来自 gapped 延伸越出段边界（第 4 步测得 35% 的块越界）。这一推测后来被否定，见 `docs/nlchain_precision_gap.md`：越界碱基对有 58% 是真阳性；差距来自缺少"重新串链 + 链分下限"这一步。
 4. **次级链与原判据的冲突**：原判据是"ancestor 真值上的 F 不降就默认开启"。按这条，T_sec ≥ 3h、N_sec=1、r_sec=0.9 的几组都达标（F_anc +0.001 ~ +0.003，10/10 个物种对）。但这些组在每个物种对上都降低 noparalogy F（−0.002 ~ −0.006），所以用户决定默认关闭。需要旁系拷贝时推荐 `--nlchainsecondary=<4h>,1,0.9`。
 5. **口径提醒**：§6 结论 3 的"次级链净负收益"来自 simHuman–simMouse，它是 16 个最终测试物种对之一，不能用来定默认值。本节的决定只依据 simTest。
+
+## 9. 方案 A 实现：gapped 之后重新串链（本地，2026-11-02）
+
+实施方案：`docs/nlchain_rechain_plan.md`（下文"方案 §x"指该文档）。完成了方案 §4 的第 1–6 步，代码尚未提交。
+
+### 9.1 已完成
+
+| 文件 | 内容 |
+|---|---|
+| `src/nlrechain.h` / `src/nlrechain.c`（新） | 方案 §2 第 1–8 步：拆块、合并完全重复块、块分、DP（2-d 树）、剥链、链内重叠裁剪、链分、下限、按 X2 分段重建 `alignel`；kent chain 格式报告；`-Dcollect_stats` 计数 |
+| `src/nlrechain_test.c`（新） | 单元测试，直接 `#include "nlrechain.c"`；`gapped_extend.o` 引用的过滤/输出函数用桩函数代替 |
+| `src/lastz.h` / `src/lastz.c` | `nlrechainparams nlr`、默认值、`--nlchainclean`、`--nlchaincleanreport`、`--nlchaingapcost` 同时选三行表、互斥检查、`debugClockNlRechain`、统计；调用点在 `finish_one_strand` 的过滤之后、`tweener_interpolate` 之前 |
+| `src/Makefile` | `nlrechain` 加入构建；新增 `make nlrechain_test` |
+
+用户确认的设计选择（2026-11-02）：D1 照搬 axtChain；D2 在被删块处切开原比对分段输出；D3 `--nlchainclean=<T_chain>` 默认 5000、0 关闭；D4 绝对值；D5 不做 chainAntiRepeat 的重复/低复杂度调整；D6 动态掩蔽用删碎片之后的比对。补充细节：
+- X1：完全重复块合并后归较长块的来源比对（等长取输入次序靠前的）。
+- X2：链内相邻、来源比对中次序相邻、接缝未被裁，三者都满足才合成一条比对，块之间沿用原比对的 indel 操作。
+- X3：输出按来源比对的输入次序排列，同一来源内按块次序。
+- X4：平局规则，见 9.3。
+- X5：`--nogapped` 下跳过；显式给 `--nlchainclean`/`--nlchaincleanreport` 时报错。
+- X6：做 `--nlchaincleanreport`。
+- 对拍门槛：Jaccard ≥ 0.995。
+
+### 9.2 验证结果
+
+- **单元测试** `make nlrechain_test`：默认 3000 轮，约 292 万项检查，0 失败（macOS clang 和 ubuntu gcc 11 都通过）。
+  - gap 表：medium/loose 三行的 11 个节点；插值截断、外推、bothGap 按 dq+dt、负值归零的手算值；与按 kent 描述（1..110 预计算、浮点插值后截断）独立写的参考实现在 dq、dt ∈ [0,400]² 及 4 万个随机大值上逐点一致；gapCalcCost 对两个参数单调不减（搜索层下界依赖这一点）。
+  - 交叉点与 connectCost：手算样例，包括调整量为负（−228）、三个位置平局取 pos=0、包含时加 1e8。
+  - 拆块：随机 edit script（含 ins 紧接 del、相邻的两个 sub 操作），块的碱基对集合等于比对的碱基对集合；块分之和减去 gap 罚分等于 `score_alignment`。
+  - DP：2-d 树与暴力枚举（每个 i 枚举全部 j）逐块比较 total 和 pred，四档规模（n ≤ 12 到 n ≈ 2500）、两张表、1–4 个字母的字母表（制造平局），全部一致；共 43.7 万条前驱边，其中 7.9 万条的交叉点调整为负。
+  - offer/settle 的规则单独手算（暴力解与 2-d 树共用这两个函数，对拍覆盖不到）：候选必须严格大于 0 且严格大于块分本身；同分取下标小的前驱。
+  - 剥链与链内整理：分别与按 kent 写法独立实现的参考解比较，全部一致；覆盖了交叉点裁剪（1.2 万块）和包含时删块（2400 条链）。
+  - 输出重建：输出比对的碱基对（按出现次数）等于保留链的块的碱基对；每条输出比对的分数等于 `score_alignment`；单条强比对原样输出（beg/end/script/分数/hspId 不变）；X1、X3 的具体例子；下限高于链分时输出为空。
+  - 变异检验：把剪枝条件改成 `≤`、去掉下界中的负调整项、去掉平局取小下标、交叉点平局改取靠后、bothGap 改查 qGap、去掉"高于块分本身"、去掉"高于 0"，测试分别报出 17、4308、442、1、33 万、1、18 项失败。唯一测不出的是 X2 的"接缝未被裁"条件：同一比对中相邻的块互不重叠，链内整理不会裁这个接缝，这两个条件实际总是成立（代码注释已说明）。
+- **回归**（macOS clang 与 ubuntu gcc 11 各跑一遍，对照 06533fd 构建的二进制）：
+  - `make base_tests` 19 项全过；`make nlchain_test` 0 失败。
+  - 不加 `--nlchain` 的 22 组选项（lav/maf/axt/general/sam/cigar/segments、`--chain`、`--chain=20,1`、`--nogapped`、`--hspthresh=top10%`、`--queryhspbest`、`--queryhsplimit`、`--strand=plus/minus`、`--anyornone`、`--inner`、target/query `[multiple]`、`--masking`、`--identity/--coverage`、UCSC 远缘参数）：stdout、stderr、退出码逐字节一致。
+  - `--nlchain --nlchainclean=0` 与 06533fd 的 `--nlchain` 在 8 组选项上逐字节一致（默认、maf、次级链、自适应阈值、UCSC 远缘参数、target `[multiple]`、loose 表、`--inner`）。输出头部回显的命令行多了 ` --nlchainclean=0`，比较前去掉。
+  - gcc 11 加 `-Werror` 构建 `lastz`、`lastz_D`、两个单测均无警告。
+- **互斥报错**：不带 `--nlchain` 单独给 `--nlchainclean`/`--nlchaincleanreport`、`--nlchain --nogapped --nlchainclean=…`、负的 T_chain，都报错退出；`--nlchain --nogapped`（不显式给）正常运行，跳过这一步。
+- **冒烟**（`-Dcollect_stats -DdbgTiming` 构建）：pseudocat vs pseudopig、aglobin human vs cow，5 组参数下计数都自洽：输入碱基对 = 完全重复合并掉的 + 链内裁掉的 + 删除链上的 + 保留的。
+- **小数据与 axtChain 对拍**（本地 OrbStack ubuntu VM 直接运行远端的 kent linux 二进制，sha256 与 `bin/kent/MANIFEST.tsv` 一致）：先用 `--nlchain --nlchainclean=0` 输出 axt，再用 `axtChain -minScore=0 -linearGap=medium -scoreScheme=HoxD55.axtChain.q` 串链。与 `--nlchain --nlchaincleanreport` 比较：
+  - 5 组（catpig、aglobin，各含 UCSC 参数、次级链 8800,1,0.9、默认参数）的链分 ≥ 5000 的链逐条相同（块和链分都一致），输出 axt 的碱基对与 axtChain ≥5000 的链的 Jaccard 都是 1.000000。
+  - 不设下限时，链分 ≥ 0 的全部链也逐条相同。报告里多出的只有负分链，axtChain 的 `-minScore=0` 本身就会丢掉它们。
+
+### 9.3 与实施方案的差异（均有理由）
+
+1. **数值类型用 double，不用 s64**（X4 原定 s64）。`lastz_D` 构建的 `score` 是 double；整数矩阵下所有分数都是 2^53 以内的整数和，double 运算精确，与 s64 等价。gap 代价仍按整数截断（`gap_row_cost` 用整数算术，与 kent 的浮点插值截断逐点一致）。
+2. **平局与前驱规则（X4 的具体化，均按 kent 行为）**：DP 按 (tStart, qStart) 次序处理；前驱候选必须严格大于 0（kent 搜索初值为 0）且严格大于块分本身；同分取 DP 次序靠前的前驱；剥链按 total 降序，同分按 DP 次序。kent 的同分次序取决于树的遍历顺序，这一点不保证相同。
+3. **2-d 树的剪枝下界比 kent 严格**。kent 用 gap 代价作为 connectCost 的下界，但交叉点调整可能为负（等于被舍弃各列的替换分之和），所以 kent 的剪枝在极少数情况下会漏掉最优前驱。这里的下界加上了"重叠列数上界 × 最低单列分"一项，保证与暴力枚举完全一致。因此在 kent 漏解的情况下，本实现可能选到更好的前驱。小数据对拍中没有出现这种差异，第 7 步的 Jaccard 会反映它的总体影响。
+4. **报告写出全部链**，包括负分链；axtChain `-minScore=0` 会丢掉负分链，对拍时按链分 ≥ 0 比较。
+5. **链内整理的"裁空"分支实际不可达**：包含（ov ≥ 任一块长）时已整块删除，否则交叉点不超过 ov，裁剪后两块都非空。代码仍按 kent 的流程保留这两个分支。
+6. **首尾相接块的合并（方案 §2 第 6.2 步）只在报告里做**：gapCalcCost(0,0) = 0、块分可加，合并不改变链分；输出比对按 X2 分段，不需要合并。
+
+### 9.4 未解决 / 风险
+
+- 性能只在小数据上看过（`nlchain rechaining` 计时为 0.000 s），全量规模要在第 8 步确认 CPU ≤ lastz 总 CPU 的 1%。
+- 与模拟的已知差别仍在：N 等非 ACGT 碱基的计分（lastz `--ambiguous=iupac` 对 axtChain 的 HoxD55 矩阵），以及 D6 的动态掩蔽效应。
+- `README.lastz.html` 和 `lastz --help` 尚未写入 nlchain 的任何选项（原计划在方案 §4 第 10 步一并补）。
+- 单测的随机流中有一处 `rnd() * rnd()` 的求值顺序由编译器决定，clang 和 gcc 下的随机用例不同（两边都 0 失败）。
+
+### 9.5 下一步（新会话）
+
+1. **提交**：本地实现与文档，先给用户看文件列表、diff 摘要和 commit message。
+2. **方案 §4 第 7 步（远端对拍）**：
+   - 在服务器上从提交后的分支构建新二进制（gcc，`-Werror`），先跑 `make nlrechain_test`、`make nlchain_test`、`make base_tests`。
+   - 用 `TUNE_BIN` 换成新二进制，在 simTest 20 个作业上跑 `--nlchain --nlchainclean=0 --nlchaincleanreport=…`；其输出应与 `runs/tune/nl_step5default/` 逐字节一致（只差命令行回显）。
+   - 再与 `runs/prec_sim/nl_step5default.medium0/<物种对>/chain_raw/` 逐链比较，以及与 `runs/prec_sim/xover/<物种对>/raw5000.chain` 比较碱基对，要求 Jaccard ≥ 0.995。
+   - 注意：对拍要用 `--nlchainclean=0` 的输出作为 axtChain 的输入，因为 D6 会让默认运行的后续 query 掩蔽不同。本地对拍脚本的做法见 9.2。
+3. **方案 §4 第 8 步（远端评测）**：默认参数和 `--nlchainsecondary=8800,1,0.9` 各跑 20 个作业（原始输出，mafComparator `--samples=10000000 --seed=1`，两份真值），并记录 CPU。验收线：F 与模拟值相差 ≤ 0.002；默认配置 F_np > 0.7205；新增阶段 CPU ≤ 1%。
+4. 第 9 步（可选，在 A 之上重扫 T_sec）、第 10 步（README、`--help`、design 文档收尾）。16 个最终测试物种对等第 8 步通过后由用户决定。
+
