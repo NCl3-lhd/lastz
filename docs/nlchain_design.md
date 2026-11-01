@@ -343,24 +343,24 @@ typedef struct nlstate			// 一个 HSP 的全部 DP 状态
 7. `--stats`：增加 HSP 数、主路径段数、各类 jumpIn 计数、次级链数及其 HSP 数、H_max 截断次数、DP 用时（`dbg_timing` 新增 `debugClockNlChaining`）。
 8. 不加 `--nlchain` 时，代码路径与现在完全一致，输出逐字节不变。
 
-### 8.3 默认值（初值，待在 Alignathon test set 上调）
+### 8.3 默认值（已在 Alignathon simTest 上调定，2026-11-01）
 
-下面的数字只是量纲合理的起点，**没有经过任何验证**，也不应该在 16 个测试物种对上调。
+"初值"列是最初按量纲设定的起点；"冻结值"列是 §9 第 5 步在 simTest（10 个物种对，UCSC 远缘参数，hspthresh=2200）上调参后定下的默认值，过程和数据见 `docs/nlchain_tune_testset.md`。16 个测试物种对不参与调参。
 
-| 参数 | 初值 | 量纲依据 |
-|---|---|---|
-| g(d) 表 | `medium` | axtChain 用于人–鼠的表；远缘用 `loose` |
-| R | 0 | 与现有 `--chain` 默认值一致 |
-| maxGap / maxDiag | 50000 / 10000 | 默认参数下 indel 超过约 2.6 kb 时跳转已更便宜（§5.1），maxDiag 主要约束 U 前驱和搜索范围 |
-| J | = hspthresh（默认 3000） | 跳转进入的新段至少要值一个 HSP |
-| λ, D0, L | 500, 1000, 8 | 跨度项最多加 4000；形式沿用 DuetMap |
-| T_solo | = 2 × hspthresh | 必须明显高于 hspthresh，否则每个 HSP 都直接是 R，U 状态失效 |
-| T_src | 0（关闭） | |
-| f_ov | 0.5 | 与 minimap2 mask_level 一致 |
-| H_max | 1000 | |
-| T_sec / N_sec / r_sec | 2 × hspthresh / 5 / 0.5 | T_sec 理由同 T_solo：单个刚过门槛的 HSP 不应单独成为次级链。N_sec、r_sec 取 minimap2 的 `-N 5`、`-p 0.8` 的量级，r_sec 放宽到 0.5 以保留分化较大的旁系拷贝 |
+| 参数 | 初值 | 冻结值 | 量纲依据 |
+|---|---|---|---|
+| g(d) 表 | `medium` | 不变（loose 差别 ≤ 0.0003） | axtChain 用于人–鼠的表；远缘用 `loose` |
+| R | 0 | 不变 | 与现有 `--chain` 默认值一致 |
+| maxGap / maxDiag | 50000 / 10000 | 不变（test set 上不起作用） | 默认参数下 indel 超过约 2.6 kb 时跳转已更便宜（§5.1），maxDiag 主要约束 U 前驱和搜索范围 |
+| J | = hspthresh（默认 3000） | 不变 | 跳转进入的新段至少要值一个 HSP |
+| λ, D0, L | 500, 1000, 8 | **1000, 3000**, 8 | 跨度项最多加 4000；形式沿用 DuetMap |
+| T_solo | = 2 × hspthresh | **= 1.25 × hspthresh** | 必须明显高于 hspthresh，否则每个 HSP 都直接是 R，U 状态失效 |
+| T_src | 0（关闭） | 不变 | |
+| f_ov | 0.5 | 不变 | 与 minimap2 mask_level 一致 |
+| H_max | 1000 | 不变 | |
+| T_sec / N_sec / r_sec | 2 × hspthresh / 5 / 0.5 | **0（关闭）/ 1 / 0.9**；需要旁系拷贝时推荐 T_sec = 4 × hspthresh | T_sec 理由同 T_solo：单个刚过门槛的 HSP 不应单独成为次级链。N_sec、r_sec 取 minimap2 的 `-N 5`、`-p 0.8` 的量级，r_sec 放宽到 0.5 以保留分化较大的旁系拷贝 |
 
-T_solo、T_sec **不与 gappedthresh 挂钩**：没给 `--gappedthresh` 时 lastz 令它等于 hspthresh（`lastz.c:9347`），Human–Mouse 用的又是 lastz 默认参数，两者都是 3000，挂钩等于没设门槛。hspthresh 为自适应（`--hspthresh=top...`）时，J、T_solo、T_sec 中的 hspthresh 改用本次收集到的最低 HSP 分（与 `finish_one_strand` 里 `lowAnchorScore` 的口径相同）。
+T_solo、T_sec **不与 gappedthresh 挂钩**：没给 `--gappedthresh` 时 lastz 令它等于 hspthresh（`lastz.c:9347`），Human–Mouse 用的又是 lastz 默认参数，两者都是 3000，挂钩等于没设门槛。hspthresh 为自适应（`--hspthresh=top...`）时，J、T_solo 中的 hspthresh 改用本次收集到的最低 HSP 分（与 `finish_one_strand` 里 `lowAnchorScore` 的口径相同）。
 
 ### 8.4 代码要求：转移方程必须一眼能对上公式
 
@@ -439,3 +439,9 @@ T_solo、T_sec **不与 gappedthresh 挂钩**：没给 `--gappedthresh` 时 last
 9. **评测口径**（§0、§9、§10）：0.236 是全真值口径，第 0 步的对照组要在无旁系同源版真值上重评；1:1 的侧别（query 端 / target 端 / 两端）三方要统一；`--chain` 的准确度不必用 `[multiple]` 重跑。
 10. **记录现有 lastz 缺陷**（§1）：`chain.c:963-964` 中 `best_predecessor` 的参数顺序传反，G 或 R 非 0 时会漏前驱。
 11. 小修正：§7 的 `σ·dt` 改为 `dt`；定义 `ov_max_i`；内存估算改为约 150 字节/HSP；行号更正。
+
+**2026-11-01，第 5 步调参后修订 §8.3。** 在 Alignathon simTest（10 个物种对）上调参，详见 `docs/nlchain_tune_testset.md`：
+
+1. λ 改为 1000、D0 改为 3000、T_solo 改为 1.25 × hspthresh：noparalogy 真值上的平均 F 从 0.7060 升到 0.7085，10 个物种对全部提高。
+2. 次级链默认关闭（T_sec = 0），N_sec、r_sec 的默认值改为 1、0.9：次级链在每个物种对上都降低 noparalogy F，ancestor F 的收益只有 +0.001 ~ +0.003。T_sec 不再按 hspthresh 自动换算。
+3. 其余参数不变；maxGap、maxDiag 在 test set 上不起作用。与 chainNet 的剩余差距来自 gapped 延伸越出段边界，调参解决不了。

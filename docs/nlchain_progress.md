@@ -1,6 +1,6 @@
 # nlchain 实现进展
 
-日期：2026-11-01。对应设计：`docs/nlchain_design.md`（下文 §x.y 均指该文档）。已完成 §9 的第 1–3 步（本地）、第 0 步（远端，结果见 §5）和第 4 步（远端，结果见 §6）；第 5 步未做。nlchain 代码已在 `nlchain` 分支提交（fa30eda，gcc 构建修复 7939842）；本文档此后的更新尚未提交。
+日期：2026-11-01。对应设计：`docs/nlchain_design.md`（下文 §x.y 均指该文档）。已完成 §9 的第 1–3 步（本地）、第 0 步（远端，结果见 §5）、第 4 步（远端，结果见 §6）和第 5 步的调参部分（远端，结果见 §8，默认值已冻结）；16 个物种对的最终运行尚未做。nlchain 代码已在 `nlchain` 分支提交（fa30eda，gcc 构建修复 7939842，第 4 步结果 5a1684d）；第 5 步的默认值改动和文档更新尚未提交。
 
 ## 1. 已完成
 
@@ -16,18 +16,18 @@
 
 ```
 --nlchain
---nlchainjump=<J>[,<λ>,<D0>,<L>]          默认 J=hspthresh, 500, 1000, 8
+--nlchainjump=<J>[,<λ>,<D0>,<L>]          默认 J=hspthresh, 1000, 3000, 8
 --nlchaingap=<maxGap>,<maxDiag>[,<R>]     默认 50000, 10000, 0
 --nlchaingapcost=medium|loose             默认 medium
---nlchainsolo=<T_solo>                    默认 2×hspthresh
+--nlchainsolo=<T_solo>                    默认 1.25×hspthresh
 --nlchainsource=<T_src>                   默认 0（关闭）
 --nlchainoverlap=<f_ov>                   默认 0.5
 --nlchainscan=<H_max>                     默认 1000
---nlchainsecondary=<T_sec>[,<N_sec>,<r_sec>]  默认 2×hspthresh, 5, 0.5；T_sec=0 关闭次级链
+--nlchainsecondary=<T_sec>[,<N_sec>,<r_sec>]  默认 0, 1, 0.9；T_sec=0 关闭次级链（默认关闭；需要旁系拷贝时推荐 T_sec=4×hspthresh）
 --nlchainreport=<file>                    段表 TSV
 ```
 
-自适应 hspthresh（`--hspthresh=top...`）下，J、T_solo、T_sec 中的 hspthresh 取本次两条链收集到的最低 HSP 分（在 merge 之前统计）。
+自适应 hspthresh（`--hspthresh=top...`）下，J、T_solo 中的 hspthresh 取本次两条链收集到的最低 HSP 分（在 merge 之前统计）。
 
 ## 2. 验证结果
 
@@ -62,9 +62,10 @@
 
 - **次级链的区域限额检查是 O(k²)**（k 为一个 query 分区内已保留的次级链数）。在 simHuman–simMouse 上，7 条染色体合计 39,230 条次级链，整个 nlchaining 阶段只用 8.7 s，不是问题；真实人类基因组上次级链会更多，届时再看。
 - 默认构建的 `unspos` 只支持 2^31 的序列长度。全基因组 `[multiple]` target（人约 3.1 Gb）要用 `lastz_32` 构建（Alignathon 的 simHuman 只有 191 Mb，不受影响）。
-- **次级链按当前默认参数是净负收益**（§6），第 5 步要决定默认值。
+- ~~次级链按当前默认参数是净负收益~~：第 5 步已改为默认关闭（§8）。
+- **与 chainNet 的 F 差距**（simTest 上 0.012，全量 simHuman–simMouse 上 0.004）调参补不上，主要来自 gapped 延伸越出段边界（§8）。
 - §7 的断点重叠：第 4 步量级很小，建议暂不处理（§6）。
-- `README.lastz.html` 和 `lastz --help` 还没有写入新选项（等参数在 test set 上定下来再补）。
+- `README.lastz.html` 和 `lastz --help` 还没有写入新选项（参数已冻结，可以补了）。
 
 ## 5. 第 0 步结果：1:1 选择的 recall 上限（远端，2026-10-31）
 
@@ -182,8 +183,34 @@
 
 1. **评测口径（已定，2026-10-31）**：第 4 步三方（nlchain、`--chain`、LASTZ+axtChain/chainNet）都用**原始输出**，直接用 mafComparator 在对应真值上评，**不做任何 1:1 后过滤，也不做 netSwap**。理由：无旁系真值是两端 1:1，任何一侧的重复使用都同样算偏差，三方按各自实际输出被扣分，比较是公平的。`maf_1to1.py` 只用于第 0 步估上限，不进入评测流程。第 0 步的数据可以用来解读结果：target 端重复使用大约让 precision 低 2 个百分点。
 2. ~~第 4 步~~：已完成，见 §6。
-3. 第 5 步：在 test set 上调 §8.3 的参数并冻结，再跑 16 个物种对。重点：
-   - 次级链：默认关闭，或者收紧 T_sec / r_sec，以 ancestor 真值上的 F 不低于 nlchain_primary 为准；
-   - J / λ / D0：看能否把 precision 补到 chainNet 的水平（差约 0.005）；
-   - 每个物种对同时跑 LASTZ+chainNet medium/3000 作为对照（`chainnet.sh`），并且必须与 nlchain 用同一种作业拆分方式。
-4. 参数冻结后，补 `README.lastz.html` 和 `lastz --help`。
+3. ~~第 5 步调参~~：已完成，默认值已冻结并写入 `lastz.c`，见 §8。
+4. **提交**：`src/lastz.c`、`src/lastz.h` 的默认值改动，以及 `docs/` 的更新（尚未提交）。
+5. **第 5 步后半：跑 16 个物种对**。参数按 §8 冻结，不再改动。
+   - 运行方式与第 4 步相同（target `[multiple]`，每条 query 染色体一个作业），每个物种对同时跑 LASTZ+chainNet medium/3000 作为对照；
+   - 服务器的 `run_nl.sh`、`chainnet.sh`、`eval_nl.sh` 写死了 simMammals 和 simHuman–simMouse，需要按 `run_tune.sh` 的方式参数化，还要接入灵长类集（数据尚未下载）；
+   - 近缘物种对没有调过参，结果要单独看。
+6. **候选算法改动**：按段的 query/target 区间裁剪 gapped 输出，用来补与 chainNet 的 precision 差距（§8 结论 3）。这属于算法改动，需要先评估、再决定做不做。
+7. 补 `README.lastz.html` 和 `lastz --help`。
+
+## 8. 第 5 步结果：simTest 调参（远端，2026-11-01）
+
+详见 `docs/nlchain_tune_testset.md`。
+
+**数据与方法**
+- Alignathon simTest：5 个物种，每个约 11 Mb，树与哺乳类集相同，10 个物种对的距离为 0.176–0.606，没有近缘物种对。
+- 两份真值投影都与独立计数一致；noparalogy 真值是两端 1:1。
+- 运行方式与第 4 步相同，用 UCSC 远缘参数（h=2200）。
+- 共跑了 79 组参数，分 4 个阶段：主路径单参数扫描、λ×T_solo×gap 表×D0 组合、次级链网格、候选组合复核。每组都显式写全全部 nlchain 参数。
+- 评测：mafComparator 10M 样本，两份真值各评一次，取 10 个物种对的平均。
+- 服务器脚本：`prepare_test.sh`、`run_tune.sh`（`TUNE_BIN` 可换二进制）、`chainnet_pair.sh`、`eval_tune.sh`、`tune_report.py`、`gen_tune_groups.py`、`diag_1to1.sh`；结果在 `results/tune/`。
+
+**结论**
+1. **冻结值**（用户确认方案 A）：λ 从 500 改为 1000，D0 从 1000 改为 3000，T_solo 从 2h 改为 1.25h；次级链默认关闭（T_sec=0，N_sec=1，r_sec=0.9）；其余不变。
+   - noparalogy 真值上的平均 F 从 0.7060 升到 0.7085，10/10 个物种对都提高；ancestor 真值上的平均 F 从 0.7069 降到 0.7054。
+   - 默认值写入 `lastz.c` 后，服务器构建的二进制只给 `--nlchain` 时，20 个作业的输出与对应调参组逐字节一致。
+2. **主路径参数整体不敏感**：单参数扫描的 F 变化都不超过 ±0.005。maxGap、maxDiag 完全不影响结果。主要取舍在 λ 和 J：跳转越贵，precision 越高、recall 越低。
+3. **与 chainNet 的差距调参补不上**：F_np 0.7085 对 0.7205，recall 相同，差距全在 precision，10 个物种对都是这样。
+   - 诊断：两边都做两端 1:1 过滤后，precision 差距只从 0.026 缩到 0.021，碱基重复使用只解释了约 1/5。
+   - 其余部分最可能来自 gapped 延伸越出段边界（第 4 步测得 35% 的块越界）。
+4. **次级链与原判据的冲突**：原判据是"ancestor 真值上的 F 不降就默认开启"。按这条，T_sec ≥ 3h、N_sec=1、r_sec=0.9 的几组都达标（F_anc +0.001 ~ +0.003，10/10 个物种对）。但这些组在每个物种对上都降低 noparalogy F（−0.002 ~ −0.006），所以用户决定默认关闭。需要旁系拷贝时推荐 `--nlchainsecondary=<4h>,1,0.9`。
+5. **口径提醒**：§6 结论 3 的"次级链净负收益"来自 simHuman–simMouse，它是 16 个最终测试物种对之一，不能用来定默认值。本节的决定只依据 simTest。

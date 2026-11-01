@@ -380,16 +380,16 @@ static const control defaultParams =
 	false,								// mergeAnchors
 	false,0,0,							// chain, chainDiag, chainAnti
 	false,								// nlchain
-	{ &nlGapCostMedium,					// nl: gapCost (§8.3 初值)
+	{ &nlGapCostMedium,					// nl: gapCost (§8.3，simTest 上调定)
 	  0,								//     antiPen R
 	  50000,10000,						//     maxGap, maxDiag
 	  0.5,								//     overlapFrac f_ov
 	  -1,								//     jumpPen J (-1 => hspthresh)
-	  500,1000,8,						//     spanCoef λ, spanScale D0, spanCap L
-	  -1,								//     soloScore T_solo (-1 => 2*hspthresh)
+	  1000,3000,8,						//     spanCoef λ, spanScale D0, spanCap L
+	  -1,								//     soloScore T_solo (-1 => 1.25*hspthresh)
 	  0,								//     minSourceSupport T_src (0 => 关闭)
 	  1000,								//     maxJumpScan H_max
-	  -1,5,0.5 },						//     secondaryScore T_sec (-1 => 2*hspthresh),
+	  0,1,0.9 },						//     secondaryScore T_sec (0 => 关闭次级链),
 										//     .. secondaryPerRegion N_sec,
 										//     .. secondaryRatio r_sec
 	NULL,NULL,							// nlReportFile, nlReportFilename
@@ -3735,8 +3735,7 @@ void nlchain_both_strands
 		}
 
 	if (nl.jumpPen        < 0) nl.jumpPen        = hspThresh;
-	if (nl.soloScore      < 0) nl.soloScore      = 2 * hspThresh;
-	if (nl.secondaryScore < 0) nl.secondaryScore = 2 * hspThresh;
+	if (nl.soloScore      < 0) nl.soloScore      = 5 * hspThresh / 4;
 
 	// 两张表分别 merge；不能对双链合表 merge（§2）
 
