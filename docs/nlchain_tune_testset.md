@@ -123,6 +123,7 @@ Alignathon 的 Simulation test set，与哺乳类集用同一棵树（同样 5 �
 - 过滤后 precision 的差距从 0.0262 缩到 0.0213，碱基重复使用只解释了约 1/5。
 - 其余约 4/5 来自比对内容本身。最可能的原因是 nlchain 的 gapped 延伸越出了段边界：第 4 步测得 35% 的块超出所属段的 query 区间，而 anchor 变少以后，y-drop 延伸不再被相邻比对挡住。
 - 这些都不是 §8.3 的参数能调的，要改算法（例如按段边界裁剪 gapped 延伸）。
+- **后续结论（2026-11-01）**：上面的"越出段边界"推测已被否定，按段框裁剪会让 F 下降。差距来自 nlchain 缺少 chainNet 流程中"拆块重新串链、丢掉低分碎片链"这一步，见 `docs/nlchain_precision_gap.md`。
 - 另外，过滤让 nlchain 的 recall 降了 0.021，而 chainNet 只降 0.002。说明 nlchain 重复使用的碱基里，也有一部分是真同源。
 
 ### 3.6 冻结后的复核
@@ -148,7 +149,7 @@ Alignathon 的 Simulation test set，与哺乳类集用同一棵树（同样 5 �
 
 ## 5. 未解决
 
-1. **与 chainNet 的 F_np 差距（test set 上 0.012，全量 simHuman–simMouse 上 0.004）调参补不上**，主要来自 gapped 延伸越出段边界（§3.5）。可以把"按段的 query/target 区间裁剪 gapped 输出"作为下一步的候选改动。
+1. **与 chainNet 的 F_np 差距（test set 上 0.012，全量 simHuman–simMouse 上 0.004）调参补不上**。根因与方案见 `docs/nlchain_precision_gap.md`：不是越出段边界，而是缺少 gapped 后的"重新串链 + 链分下限"；推荐方案 A 尚待确认。
 2. **近缘参数**：test set 里没有近缘物种对，灵长类距离要么沿用这套参数，要么另找调参数据。
 3. **README.lastz.html 和 `lastz --help`** 还没有写入 nlchain 选项。
 
