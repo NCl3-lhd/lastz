@@ -208,8 +208,8 @@
      | chainNet | 0.7205 | 0.7191 |
 
    - ~~编码、单测、本地回归~~：已完成（2026-11-02），见 §9。D1–D6 与补充细节 X1–X6 均按推荐确认。
-   - **下一步**：远端第 7 步（simTest 20 个作业与 axtChain 对拍，保留碱基对 Jaccard ≥ 0.995）和第 8 步（两套配置在两份真值上评测，验收线见实施方案 §4），见 §9.5。
-   - 步骤 5（16 个物种对）建议等方案 A 通过 simTest 复核后再跑。
+   - ~~远端第 7 步（与 axtChain 对拍）、第 8 步（两套配置评测）~~：已完成（2026-11-02），全部达标，见 §10。
+   - 步骤 5（16 个物种对）：方案 A 已通过 simTest 复核，何时跑由用户决定。
 7. 补 `README.lastz.html` 和 `lastz --help`。
 
 ## 8. 第 5 步结果：simTest 调参（远端，2026-11-01）
@@ -306,3 +306,83 @@
 3. **方案 §4 第 8 步（远端评测）**：默认参数和 `--nlchainsecondary=8800,1,0.9` 各跑 20 个作业（原始输出，mafComparator `--samples=10000000 --seed=1`，两份真值），并记录 CPU。验收线：F 与模拟值相差 ≤ 0.002；默认配置 F_np > 0.7205；新增阶段 CPU ≤ 1%。
 4. 第 9 步（可选，在 A 之上重扫 T_sec）、第 10 步（README、`--help`、design 文档收尾）。16 个最终测试物种对等第 8 步通过后由用户决定。
 
+
+> 9.5 的第 1–3 项已完成：实现在 8e9f350 提交；第 7、8 步见 §10。第 2 项写的"`--nlchainclean=0 --nlchaincleanreport=…`"行不通：T_chain=0 时整个重新串链阶段被跳过（`lastz.c` 中 `minChainScore > 0` 才调用），报告为空。实际改用 `--nlchainclean=1`，见 10.2。
+
+## 10. 方案 A 远端复核：第 7–8 步（远端，2026-11-02）
+
+服务器 `MSA_Dedicated_Server_Remote:/mnt/sda/liuhaodong/workspace/experiment/lastz_profiling`，设 `PROJECT_ROOT` 为该目录。结果汇总在 `results/nlr/`。
+
+### 10.1 构建与测试
+
+- 源码：`git archive 8e9f350` 解到 `external/lastz-8e9f350`。构建脚本 `scripts/bootstrap_nlr.sh`，仿照 `bootstrap_nl.sh`，不覆盖已有二进制，sha256 记在 `bin/MANIFEST_nlr.tsv`。
+  - `bin/lastz_nlr`：正式版，默认 Makefile，含 `-Werror`，gcc 13.1，sha256 `13271116…89ddc6`。
+  - `bin/lastz_nlr_prof`：`-Dcollect_stats -DdbgTiming`，sha256 `38e8a301…dbf86`。这一版不加 `-Werror`：`-Dcollect_stats` 下上游 `pos_table.c:2193/2195` 的 `sprintf` 会触发 gcc 13 的 `-Wformat-overflow`，与本次改动无关。脚本另外检查 `nl*.c/h` 没有警告。
+- 测试（在源码副本 `build/nlr_tests/` 中运行）：`make nlrechain_test` 共 2,929,359 项检查，0 失败；`make nlchain_test` 共 518,512 项检查，0 失败；`make base_tests` 19 项全部 SUCCESS；`make lastz_D` 加 `-Werror` 通过。正式版、单测、`lastz_D` 的构建日志都没有 warning。
+- 冒烟：两版在 pseudocat vs pseudopig 上的 `--nlchain` 输出和清洗报告逐字节一致。
+
+### 10.2 第 7 步：与 axtChain 对拍（通过）
+
+- 参数组加在 `config/tune_groups.tsv` 末尾，用 `TUNE_BIN=bin/lastz_nlr` 运行：`nlr_clean0`、`nlr_clean1`、`nlr_default`、`nlr_sec`、`nlr_default_prof`。注意：重新运行 `gen_tune_groups.py` 会覆盖这些行。
+- `scripts/run_tune.sh` 只加了一行：组参数含 `--nlchainclean=` 时，自动加 `--nlchaincleanreport=<作业>.clean.chain`。原版备份在 `logs/run_tune.sh.bak_nlr`。
+- **`nlr_clean0`（`--nlchain --nlchainclean=0`）**：20 个作业的 MAF（去掉 `#` 行）和 `segs.tsv` 都与 `nl_step5default` 逐字节一致，说明关闭开关就回到旧行为。这一组的清洗报告为空，原因见 9.5 后的说明。
+- **对拍用 `nlr_clean1`（`--nlchainclean=1`）**：报告写出全部链，只删掉链分 < 1 的链；axtChain 的 `-minScore=0` 本来也会丢掉这些链。20 个作业的 `segs.tsv` 与 `nl_step5default` 逐字节一致。
+- 对拍脚本 `scripts/nlr_vs_axtchain.py <组> <物种对>`：
+  - 逐作业比较 lastz 报告中链分 ≥ 0 的链与 `chain_raw/<作业>.chain`。比较内容是头部（不含 id）、块列表和链分，按多重集比较。
+  - 按物种对计算链分 ≥ 5000 的碱基对集合与 `xover/<物种对>/raw5000.chain` 的 Jaccard。
+  - 结果在 `results/nlr/step7.tsv`，差异链示例在 `results/nlr/step7_diff.log`。
+
+| 物种对 | 链 ≥0 一致 / kent | 链 ≥5000 一致 / kent | Jaccard（≥5000 碱基对） |
+|---|---|---|---|
+| Mouse-Rat | 10671 / 10702 | 889 / 900 | 0.999894 |
+| Cow-Dog | 15738 / 15770 | 968 / 979 | 0.999870 |
+| Dog-Human | 16216 / 16263 | 946 / 961 | 0.999875 |
+| Cow-Human | 15729 / 15761 | 950 / 960 | 0.999872 |
+| Human-Mouse | 11255 / 11298 | 762 / 778 | 0.999838 |
+| Human-Rat | 11181 / 11218 | 671 / 684 | 0.999725 |
+| Dog-Mouse | 9012 / 9048 | 522 / 533 | 0.999869 |
+| Dog-Rat | 7892 / 7921 | 455 / 464 | 0.999914 |
+| Cow-Mouse | 6786 / 6807 | 472 / 481 | 0.999921 |
+| Cow-Rat | 6362 / 6385 | 433 / 442 | 0.999829 |
+| 合计 | 110842 / 111173（99.70%） | 7068 / 7182（98.4%） | 0.99973–0.99992 |
+
+- **Jaccard 全部 ≥ 0.9997，远高于门槛 0.995**。另有一项自检：kent 一侧按作业统计的 ≥5000 链数与 `raw5000.chain` 的链数逐对相同。
+- **差异链的性质**：没有"块完全相同、只有链分不同"的情况（n_scorediff = 0）。
+  - 差异链里有正链上的链，而正链先于负链处理，不受删链经由掩蔽的影响，所以差异来自串链细节本身，不是输入不同。
+  - 细看了一条：Mouse-Rat 正链主链，两边端点相同、块数都是 64856。差别只在 3 处相邻块的切分（交叉点位置不同，例如 kent 的 `129 0 3 / 3 0 137` 对 lastz 的 `120 0 137 / 12 0 3`）。lastz 的链分高 4833（279,358,693 对 279,353,860）。
+  - 这与 9.3 第 3 条的预期一致：kent 的剪枝下界不严格，偶尔会漏掉最优前驱。但只细看了这一条，其余差异链的原因没有逐条核实。
+
+### 10.3 第 8 步：两套配置评测（全部达标）
+
+运行：`nlr_default`（`--nlchain`）、`nlr_sec`（`--nlchain --nlchainsecondary=8800,1,0.9`），各 20 个作业；评测用 `eval_tune.sh`（mafComparator `--samples=10000000 --seed=1`，两份真值）；汇总用 `tune_report.py`，结果在 `results/nlr/step8_report.txt`。运行前 `results/tune/long.tsv` 备份为 `logs/long.tsv.bak_nlr`。
+
+| 组 | R_np | P_np | F_np | R_anc | P_anc | F_anc | 模拟 F_np / F_anc | CPU (s) |
+|---|---|---|---|---|---|---|---|---|
+| nl_step5default（旧） | 0.7517 | 0.6707 | 0.7085 | 0.6681 | 0.7499 | 0.7054 | — | 1421 |
+| **nlr_default** | 0.7492 | 0.7022 | **0.7247** | 0.6632 | 0.7819 | **0.7167** | 0.7247 / 0.7167 | 1678* |
+| **nlr_sec** | 0.7494 | 0.6947 | **0.7208** | 0.6691 | 0.7803 | **0.7194** | 0.7208 / 0.7194 | 1702* |
+| chainNet medium/3000 | 0.7505 | 0.6930 | 0.7205 | 0.6696 | 0.7780 | 0.7191 | — | 2884 |
+
+- **F 与模拟值完全相同**（四个数的差都是 0.0000，验收线是 ≤ 0.002）。D6 的动态掩蔽效应在平均值上看不出来。
+- **默认配置 F_np 0.7247 > 0.7205（chainNet）**，在 9/10 个物种对上不低于 chainNet，唯一低的是 Dog-Mouse（0.6221 对 0.6222）。
+  - 默认配置的 F_anc 比 chainNet 低 0.0024，在 5/10 个物种对上不低于 chainNet。
+  - 次级链配置的 F_np 0.7208、F_anc 0.7194，两项都略高于 chainNet，与模拟的结论相同。
+- 碱基重复使用（tMul/qMul）从 0.046/0.038 降到 0.016/0.009。
+- **新增阶段 CPU 0.21%（验收线 1%）**：`nlr_default_prof` 的 20 个作业中，`nlchain rechaining` 合计 3.08 s，`total run time` 合计 1436.9 s。计时用墙钟（`gettimeofday`），单线程作业下近似 CPU 时间。
+- *CPU 一列的说明：`nlr_default`/`nlr_sec` 的 1678/1702 s 比旧的 1421 s 高约 18%，但原因是服务器负载，不是新代码。证据有两条：
+  - `nlr_clean0` 跳过了新阶段、输出与旧版逐字节相同，与这两组同批 60 个作业并行时为 1712 s；
+  - `nlr_default_prof` 单独以 20 个作业并行时为 1437 s。
+  - 服务器当时的负载约为 60/256。
+
+### 10.4 未解决 / 风险
+
+- 第 7 步约 0.3% 的链与 axtChain 不同，只细看了一条，原因判断为交叉点或前驱的平局与剪枝差异，没有逐条核实。对碱基对和 F 的影响可以忽略（Jaccard ≥ 0.9997，F 与模拟相同）。
+- 9.4 中其余的风险仍然存在：N 碱基计分、全基因组规模下的性能、`README.lastz.html` 和 `--help` 尚未补。
+- 服务器上的新脚本和改动（`bootstrap_nlr.sh`、`nlr_vs_axtchain.py`、`run_tune.sh` 加的一行、`tune_groups.tsv` 加的 5 行）只在服务器上，不在本仓库。本仓库的脚本副本在本次会话的 scratchpad 中，会话结束后就没有了。
+
+### 10.5 下一步（新会话）
+
+1. 提交本文档的更新（先给用户看 diff 和 commit message）。
+2. 方案 §4 第 9 步（可选）：在 A 之上重扫 T_sec ∈ {3h, 4h, 6h}，N_sec=1，r_sec=0.9。用 `TUNE_BIN=bin/lastz_nlr`，参数组写进 `tune_groups.tsv`，评测流程同 10.3。
+3. 方案 §4 第 10 步：更新 `docs/nlchain_design.md`（§7 回溯流程加重新串链一步、§8 接口加 `--nlchainclean`/`--nlchaincleanreport`/`--nlchaingapcost`），补写 `README.lastz.html` 和 `lastz --help`。
+4. 16 个最终测试物种对（§7 第 5 项）：由用户决定何时跑。服务器脚本需要先参数化，参数按 §8 加方案 A，二进制用 `bin/lastz_nlr`。
