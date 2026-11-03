@@ -4,6 +4,8 @@
 
 **2026-11-02**：方案 A（gapped 之后重新串链 + 链分下限，`docs/nlchain_rechain_plan.md`）的本地实现和验证已完成（实施方案 §4 第 1–6 步），见 §9；尚未提交，远端对拍和评测（第 7–8 步）尚未做。
 
+**2026-11-03**：nlchain 模式下 gapped 之前做正反两链插值（`docs/nlchain_prechain_inner_plan.md`）的本地实现和验证已完成（该方案 §7 第 1–4 步），见 §11；尚未提交，远端实验（第 5 步，该方案 §8）尚未做。
+
 ## 1. 已完成
 
 | 文件 | 内容 |
@@ -386,3 +388,84 @@
 2. 方案 §4 第 9 步（可选）：在 A 之上重扫 T_sec ∈ {3h, 4h, 6h}，N_sec=1，r_sec=0.9。用 `TUNE_BIN=bin/lastz_nlr`，参数组写进 `tune_groups.tsv`，评测流程同 10.3。
 3. 方案 §4 第 10 步：更新 `docs/nlchain_design.md`（§7 回溯流程加重新串链一步、§8 接口加 `--nlchainclean`/`--nlchaincleanreport`/`--nlchaingapcost`），补写 `README.lastz.html` 和 `lastz --help`。
 4. 16 个最终测试物种对（§7 第 5 项）：由用户决定何时跑。服务器脚本需要先参数化，参数按 §8 加方案 A，二进制用 `bin/lastz_nlr`。
+
+## 11. gapped 之前插值：本地实现与验证（2026-11-03）
+
+实施方案：`docs/nlchain_prechain_inner_plan.md`（下文"方案 §x"指该文档）。完成了方案 §7 的第 1–4 步，全部在本地 OrbStack ubuntu VM（gcc 11.4）上完成。代码尚未提交；第 5 步（远端实验，方案 §8）未做。
+
+### 11.1 已完成
+
+| 文件 | 内容 |
+|---|---|
+| `src/tweener.h` / `src/tweener.c` | 新增 `tweener_collect_nl_hsps`：遍历第一次串链的主路径，在段内相邻 HSP 之间的窗口里用 7-mer 种子正反两个方向找 HSP，放进调用者给的两张临时表；无损预筛；`tweenerStats` 增加 `numNlWindows`、`numNlWindowsSkipped`、`nlWindowArea`、`numNlHsps[2]`、`numPass1Dropped`。`tweener_interpolate`、`bounded_align`、`collect_inner_hsps` 一行未动 |
+| `src/lastz.h` / `src/lastz.c` | 参数 `nlInnerJump`、`nlInnerSolo`（默认 -1）；`--nlchaininner=<J2>[,<T_solo2>]`；D8 与"`--nlchaininner` 要求 `--inner`"两项检查；`nlchain_both_strands` 按方案 §3 第 3–5 步改为两次串链；私有函数 `append_inner_hsps`（D9）；`collect_stats` 下的 numPass1Dropped 统计；nlchain 下 `finish_one_strand` 不再调用 `tweener_interpolate` |
+| `test_data/nlchain_inner/make_inner_test.py`（新） | 构造测试数据生成脚本（方案 §7 第 3 步），按 x-drop 校准 X、W 的 HSP 分数，按方案 §2.1 的公式核对两档跳转代价，写出 `expected.json` |
+| `test_data/nlchain_inner/check_inner_test.py`（新） | 运行并判定构造测试的全部预期，可选对照 d9db595 二进制和 `collect_stats` 构建 |
+
+`src/nlchain.c`/`nlchain.h` 未改。决策按方案 §4 的推荐执行，D6 取 §4.1 的 b2（J2 = min(J, ⌊innerThreshold/2⌋)，T_solo2 = min(T_solo, ⌊5·innerThreshold/4⌋)，对第二次串链的全部 HSP 生效）。
+
+用法（构造测试）：
+
+```
+python3 test_data/nlchain_inner/make_inner_test.py <数据目录>
+python3 test_data/nlchain_inner/check_inner_test.py <新 lastz> <数据目录> [--base <d9db595 的 lastz>] [--stats <collect_stats 构建>]
+```
+
+### 11.2 验证结果
+
+- **构建**：gcc 11.4 加 `-Werror` 构建 `lastz`、`lastz_D`、`nlchain_test`、`nlrechain_test`，0 警告。`-Dcollect_stats -DdbgTiming`（不加 `-Werror`）构建通过，5 条警告都在原有文件里（`gapped_extend.c` 5824/5830 行 2 条 `-Wmisleading-indentation`、`pos_table.c` 2 条、`quantum.c` 1 条），新改的文件没有警告。
+- **测试**：`make base_tests` 19 项 SUCCESS；`nlchain_test` 518,512 项检查 0 失败；`nlrechain_test` 2,929,359 项检查 0 失败。
+- **回归**（对照 d9db595 构建的二进制，两边用相同的相对路径运行，比较 stdout、stderr、退出码）：
+  - 不加 `--nlchain` 的 24 组全部逐字节一致。数据为 pseudocat vs pseudopig，22 组为：lav（默认）、maf、axt、general、sam、cigar、`--nogapped --format=segments`、`--chain`、`--chain=20,1`、`--nogapped`、`--hspthresh=top10%`、`--queryhspbest=5`、`--queryhsplimit=10`、`--strand=plus`、`--strand=minus`、`--anyornone`、`--inner=2000`、target `[multiple]`（pseudopig 三条）、query `[multiple]`、`--masking=3`、`--identity=70 --coverage=5`、UCSC 远缘参数（HoxD55、`--hspthresh=2200 --inner=2000 --ydrop=3400 --gappedthresh=4000`）。另加 2 组：aglobin `--inner=2000`、aglobin `--inner=1500 --chain`。之前会话的回归脚本已经丢失，这份清单是按 §9.2 的描述重建的。
+  - `--nlchain` 的 8 组全部逐字节一致，含 `--nlchainreport` 段表：默认、maf、次级链 `8800,1,0.9`（aglobin）、`--hspthresh=top50%`、UCSC 远缘参数（aglobin，不加 `--inner`）、target `[multiple]`、`--nlchaingapcost=loose`、query `[multiple]`（替换原来的 `--inner` 组，方案 §2.6）。
+  - `--nlchain --inner=2000 --nogapped`：两版都报 "--inner requires --gapped"，逐字节一致（见 11.3 第 2 条）。
+- **互斥**：`--nlchain --inner --self` 报 "--nlchain can't be used with both --inner and --self"；`--nlchaininner` 不带 `--inner`、取负值（J2 或 T_solo2）、给 3 个值都报错；不带 `--nlchain` 时报 "require --nlchain"。`--self --nlchain`（不带 `--inner`）和非 nlchain 的 `--self --inner` 照常运行。
+- **构造测试**（数据种子 20261103）：X 长 68 bp，s_X = 6476；W 长 23 bp，s_W = 2246。W→X→B 两次跳转的代价按方案 §2.1 的公式算，J2 = 1000 时为 3984，J = 3000 时为 7984，s_X 落在两者之间。`check_inner_test.py` 21 项全部通过：
+  - 推导值：段表依次为 `S + A…W`（2 个 HSP）、`I − X`、`I + B`，坐标与构造一致；输出中有 X 的反链比对，没有 W；加 `--gappedthresh=2000` 后 W 出现。
+  - `--nlchaininner=3000,3750`（D6a）：只有一段 `S + A…B`（3 个 HSP，含 W），没有 X，也没有 W 的比对。
+  - `--nlchaininner=1000`：与推导值逐字节一致。
+  - d9db595（同样参数，去掉 `--nlchaininner`）：没有 X，W 由旧 tweener 输出。
+  - 变体：query 整体反向互补后，段表的 σ 对调，段表和比对坐标都与正向运行一致（这一组让正链方向搜索找 X、反链方向搜索找 W，两条坐标换算都覆盖到了）；target `[multiple]`、query `[multiple]`（构造都放在第二条序列上）与单条运行逐字节一致。
+  - 自适应 `--hspthresh=top50%`：W 在主路径第一段的末尾；加 `--inner` 的输出只比不加多出 X。
+  - `collect_stats` 构建：窗口 1 个，预筛跳过 0 个，插值 HSP 反/正 = 1/1，numPass1Dropped = 0，nlchain HSPs = 4（第一次 2 个 + 插值 2 个，说明 D10 的快照恢复生效）。
+- **D9 临时调试**（只在 VM 的源码副本里加打印，仓库代码不含）：在 `finish_one_strand` 打印 `lowAnchorScore`，在 `append_inner_hsps` 前后打印 `lowScore`。构造数据加 `--hspthresh=top50%`：
+  - 带恢复：加不加 `--inner`，`lowAnchorScore` 都是 836（top40% 时都是 974，top30% 时都是 1157）。
+  - 去掉恢复的对照构建：反链表在压缩后为空，加入 X 后 `lowScore` 变成 6476，两表取小后 `lowAnchorScore` 从 836 变成 842。说明不做 D9 时门槛确实会变。
+- **冒烟**（`collect_stats` 构建，`--nlchain --inner=2000`，加 `--debug=anchors` 看每次的 HSP 数）：
+
+  | 数据 | 第一次输出 | 插值 HSP 反/正 | merge 后 = 第二次输入 | nlchain HSPs | 窗口 / 预筛跳过 | numPass1Dropped |
+  |---|---|---|---|---|---|---|
+  | pseudocat vs pseudopig（3 条 query 合计） | 17 | 22 / 0 | 39 | 39 | 11 / 0 | 0 |
+  | 同上，次级链 `8800,1,0.9` | 17 | 22 / 0 | 39 | 39 | 11 / 0 | 0 |
+  | aglobin human vs cow | 38 | 0 / 40 | 78 | 78 | 29 / 2 | **0** |
+  | 同上，次级链 `8800,1,0.9` | 45 | 0 / 40 | 85 | 85 | 29 / 2 | 3 |
+
+  - 计数自洽：第二次输入 = 第一次输出 + 插值 HSP（这几组 merge 都没有合并掉 HSP），也等于 `nlchainStats` 的 HSP 数。pseudopig 的比对都在反链上，所以插值 HSP 都是反向的。
+  - 默认参数下 numPass1Dropped 为 0，符合预期。次级链下为 3，原因见 11.4。
+- **预筛无损**：用关掉预筛的临时构建对照，3 组数据（aglobin、pseudocat、构造数据）× `--inner` 取 2000/5000/8000 × 开不开次级链，共 18 组，MAF（去掉回显命令行的注释行）、段表、stderr 全部一致。aglobin 上被跳过的窗口分别为 2、5、6 个。
+
+### 11.3 与实施方案的差异（均已确认或有理由）
+
+1. **numPass1Dropped 放在 `tweenerStats`**，由 `tweener_show_stats`/`tweener_generic_stats` 输出（方案原写 `nlchainStats`，但那要改 `nlchain.h/c`，与"不改 nlchain.c/h"冲突；用户确认）。新增的这几项统计只在有插值窗口时输出，非 nlchain 的 `--inner --stats` 输出不变。
+2. **D7**：`--inner` 与 `--nogapped` 在原版就互斥（`lastz.c` 参数检查报 "--inner requires --gapped"），所以方案 §7 第 2 步"`--nlchain --inner --nogapped` 正常运行"不成立。保留原有报错，`nlchain_both_strands` 中按 `gappedExtend` 判断只作防御（用户确认）。
+3. **W 的位置**：8 kb 空隙中 X 居中时，左右两侧各约 3.97 kb，W 不可能距 X 和两端都 ≥ 2 kb。实际放在距左端约 1.95 kb、距 X 约 2 kb 处；这个距离的用意是不让 A 和 X 的 gapped 延伸吞掉 W，默认 ydrop 下足够。W 在 X 之前，所以段表的第一段是 `S + A…W`，不是方案写的 `S + A`。
+4. **自适应变体的预期改了**。方案原写"验证 W 的比对不会因为门槛被拉低而输出"，这在构造数据上做不到：自适应下主搜索本身就以很低的门槛（约 836）收集 HSP，W 不加 `--inner` 也会被找到并输出（d9db595 也一样）。另外显式给 `--gappedthresh` 时 gapped 门槛不随自适应变化，测不出 D9。改为不给 `--gappedthresh`，检查"加 `--inner` 只多出 X"；D9 本身由上面的临时调试证实。
+5. **预筛的 maxSub 取整个替换矩阵的最大值**，不只看 ACGT（方案 §2.8）。这样对 N、IUPAC 等字符也是无损的；HoxD70 下两者都是 100。
+6. **窗口上限不取偶**：旧 tweener 把 windowSize 向上取偶（`round_up_2`），新函数直接用 `--inner` 的窗口值。
+7. 并入主表时沿用插值临时表里已分配的 hspId，不再取新号（方案只要求进临时表时传 0）。
+8. `--debug=anchors` 的那一行比方案多打印 merge 后的 HSP 数，用于核对冒烟计数。
+
+### 11.4 未解决 / 风险
+
+- **次级链下 numPass1Dropped = 3**（aglobin，`--nlchainsecondary=8800,1,0.9`）：被丢的 3 个 HSP 正好是第一次次级链 2 的全部 HSP（cow 20988–22009 对 human 33112–35156，链分 32395，高于 T_sec）。用 `--nlchaininner=3000,3750`（第二次参数与第一次相同）时这条次级链同样消失，所以原因不是 J2 降低，而是插值 HSP 加强了这段 query 区间内的主路径（第一段 HSP 从 12 个增加到 31 个），次级链没能通过 r_sec 的区域比值检查。这属于方案 §4.1 预料到的"打开次级链时"的例外；默认参数（次级链关闭）下为 0。§8 的 G2p 要在 simTest 上再看这个数。
+- **b2 下主路径被切成更多 G 段**：aglobin 上第一次 4 段，第二次 15 段（多出来的都是 G）。原因是 J2 = 1000 后，g(d) 超过约 1 kb 级跳转代价的正常边改走跳转。这与方案 §4.1"只改变段的划分"一致，不影响进入 gapped 的 HSP 集合，但 §8 用段表比较 I 段数时要只数 I，不能看总段数。
+- 性能只在小数据上看过（插值计时 0.001–0.002 s）；MR_chr0 规模下窗口数约为旧版 10 倍（方案 §2.8），要在 G2p 看实际耗时。
+- 回归脚本与选项清单这次也放在 scratchpad 中，会话结束后会丢失；清单已写在 11.2。构造测试的两个脚本已放进 `test_data/nlchain_inner/`。
+- `README.lastz.html` 和 `lastz --help` 仍未写入任何 nlchain 选项（含 `--nlchaininner`）。
+
+### 11.5 下一步（新会话）：远端实验（方案 §8）
+
+1. 先提交本次实现（给用户看文件列表、diff 摘要和 commit message）。
+2. 服务器构建：仿照 `scripts/bootstrap_nlr.sh`，从提交后的版本 `git archive` 构建正式版（gcc 13，`-Werror`）和 `-Dcollect_stats -DdbgTiming` 版，sha256 记入 MANIFEST；先跑 `make base_tests`、`nlchain_test`、`nlrechain_test`。远端坑见记忆文件（tar 关 xattr、ssh 后台启动包子 shell）。
+3. 在 simTest 20 个作业上跑方案 §8 的各组：G0（新，`--nlchain`，应与 `nlr_default` 逐字节一致，只差命令行回显）、G1（d9db595，`--nlchain --inner=2000`；d9db595 与 8e9f350 的 `src/` 相同，可直接用服务器上的 `bin/lastz_nlr`）、G2（新，`--inner=2000`，b2）、G2b1（`--nlchaininner=2000,2500`）、G2a（`--nlchaininner=2200,2750`）、G3（`--inner=2000 --gappedthresh=2000`）、G3b（只加 `--gappedthresh=2000`）、G2p（统计版，同 G2），可选 G4（方案 B 补丁二进制，不提交）。参数组写进 `config/tune_groups.tsv`，评测和汇总同 §10.3。
+4. 比较 R/P/F（np、anc）、tMul/qMul、CPU、插值与 nlchaining 耗时；插值窗口数、预筛比例、插值 HSP 数；`--nlchainreport` 中的 I 段数（G2/G2b1/G2a 对 G0）；G2p 的 numPass1Dropped。按方案 §8 的判定规则决定 D6 的默认值、是否把 gapped 门槛默认降到 innerThreshold、是否改用方案 B。

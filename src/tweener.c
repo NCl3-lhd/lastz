@@ -32,6 +32,11 @@
 //		B exists, think of A as being on the left end of a chain of (1 or more)
 //		outer alignments, and search for weak alignments to its left.
 //
+// tweener_collect_nl_hsps 是 nlchain 模式下的插值，在 gapped 之前运行：对第一
+// 次串链主路径上每段内相邻两个 HSP 之间的窗口，用同样的 inner 种子在 query 正反
+// 两个方向上搜 HSP，交给调用者并入两张单链表后再串一次链。它只做到 HSP，不做
+// chaining 和 gapped extension。见 docs/nlchain_prechain_inner_plan.md。
+//
 //----------
 
 //----------
@@ -139,6 +144,9 @@ static void     activate              (alignel* a, int isRightEnd);
 static active*  dismiss               (active* c);
 static void     extract_subsequence   (seq* sf, unspos b, unspos e, seq* dst);
 static void     copy_reverse_sequence (seq* sf, seq* dst);
+static void     search_nl_window      (postable* seq1Positions, seq* window);
+static void     append_shifted        (segtable** dst,
+                                       unspos shift1, unspos shift2, int id);
 
 //----------
 //
@@ -1110,6 +1118,242 @@ static void copy_reverse_sequence
 
 //----------
 //
+// tweener_collect_nl_hsps--
+//	nlchain 模式下 gapped 之前的插值（docs/nlchain_prechain_inner_plan.md）。
+//	对第一次串链的主路径，每段内相邻两个 HSP 之间的窗口里，用 innerSeed 在
+//	query 正反两个方向上搜 HSP。
+//
+//----------
+//
+// Arguments:
+//	seq*		target:			target 序列。
+//	seq*		query:			query 序列；调用时处于反向互补状态。
+//	const u8*	qToComplement:	query 的互补表（可为 NULL，同 rev_comp_sequence）。
+//	const s8	upperCharToBits[], seed* innerSeed, scoreset* maskedScoring,
+//	score		xDrop:			同 tweener_interpolate 中找 HSP 的参数。
+//	score		innerThreshold:	窗口内 HSP 的分数门槛。
+//	u32			windowSize:		窗口在 target、query 上的长度上限。
+//	const nlchainresult* r:		第一次串链的段表；first/count 指向压缩后的表。
+//	const segtable* stMinus:	反链表（pos2 为反向互补坐标）；只读。
+//	const segtable* stPlus:		正链表；只读。
+//	segtable**	innerMinus:		收集反链方向找到的 HSP（pos2 为反向互补坐标）。
+//	segtable**	innerPlus:		收集正链方向找到的 HSP（pos2 为正链坐标）。
+//
+// Returns:
+//	(nothing)；新 HSP 加进 *innerMinus、*innerPlus（add_segment 可能换掉指针）。
+//
+//----------
+
+void tweener_collect_nl_hsps
+   (seq*			target,
+	seq*			query,
+	const u8*		qToComplement,
+	const s8		_upperCharToBits[],
+	seed*			_innerSeed,
+	scoreset*		_maskedScoring,
+	score			_xDrop,
+	score			innerThreshold,
+	u32				_windowSize,
+	const nlchainresult* r,
+	const segtable*	stMinus,
+	const segtable*	stPlus,
+	segtable**		innerMinus,
+	segtable**		innerPlus)
+	{
+	seqpartition*	sp2 = &query->partition;
+	partition*		part;
+	seq*			winT, *winMinus, *winPlus;
+	postable*		seq1Positions;
+	const nlsegment* nls;
+	const segtable*	st;
+	const segment*	u, *v;
+	unspos			qFrom, qTo, t0, t1, a0, a1, r0, r1, f0, dt, dq;
+	score			maxSub;
+	u32				s, k, c1, c2;
+
+	//////////
+	// setup（仿照 tweener_interpolate）
+	//////////
+
+	seq1            = target;
+	seq2            = query;
+	upperCharToBits = _upperCharToBits;
+	innerSeed       = _innerSeed;
+	maskedScoring   = _maskedScoring;
+	xDrop           = _xDrop;
+	scoreThresh.t   = 'S';
+	scoreThresh.s   = innerThreshold;
+	windowSize      = _windowSize;
+
+	// 窗口片段：target、query 反链方向、query 正链方向（反向互补）
+
+	winT     = new_sequence (windowSize);
+	winMinus = new_sequence (windowSize);
+	winPlus  = new_sequence (windowSize);
+
+	winT->needTrueLen = target->needTrueLen;
+	winMinus->needTrueLen = winPlus->needTrueLen = query->needTrueLen;
+
+	tweenSeq1 = winT;
+	tweenSeq2 = winMinus;
+
+	simpleInfo.hp.reporter         = collect_inner_hsps;
+	simpleInfo.hp.reporterInfo     = NULL;
+	simpleInfo.hp.minMatches       = -1;			// (no filtering)
+	simpleInfo.hp.gfExtend         = gfexXDrop;
+	simpleInfo.hp.seq1             = winT;
+	simpleInfo.hp.seq2             = winMinus;
+	simpleInfo.hp.scoring          = maskedScoring;
+	simpleInfo.hp.xDrop            = xDrop;
+	simpleInfo.hp.hspThreshold     = scoreThresh;
+	simpleInfo.hp.hspZeroThreshold = (scoreThresh.t !='S')? 0
+		                           : (scoreThresh.s >  0 )? scoreThresh.s
+		                                                  : 0;
+	simpleInfo.hp.anchors          = NULL;
+	simpleInfo.hp.entropicHsp      = false;
+	simpleInfo.hp.reportEntropy    = false;
+
+	innerAnchors = new_segment_table (numDefaultAnchors, 0);
+
+	// 无损预筛用的单列最高分（§2.8）；取整个替换矩阵的最大值，不只看 ACGT，
+	// 这样对 N 等字符也不会漏
+
+	maxSub = maskedScoring->sub[0][0];
+	for (c1=0 ; c1<256 ; c1++)
+		for (c2=0 ; c2<256 ; c2++)
+			{
+			if (maskedScoring->sub[c1][c2] > maxSub)
+				maxSub = maskedScoring->sub[c1][c2];
+			}
+
+	//////////
+	// 主路径各段内相邻 HSP 之间的窗口（§6）
+	//////////
+
+	for (s=0 ; s<r->len ; s++)
+		{
+		nls = &r->seg[s];
+		if ((nls->isSecondary) || (nls->count < 2)) continue;
+		st = (nls->strand < 0)? stMinus : stPlus;
+
+		// 段内 HSP 都在同一个 query 分区里
+
+		if (sp2->p == NULL)
+			{ qFrom = 0;  qTo = query->len; }
+		else
+			{
+			part  = &sp2->p[nls->part2];
+			qFrom = part->sepBefore + 1;
+			qTo   = part->sepAfter;
+			}
+
+		for (k=nls->first ; k+1<nls->first+nls->count ; k++)
+			{
+			// u 是在本链方向坐标上靠前的一个；段内 HSP 按正链 query 升序排列，
+			// 反链坐标随之递减
+
+			if (nls->strand > 0) { u = &st->seg[k];    v = &st->seg[k+1]; }
+			                else { u = &st->seg[k+1];  v = &st->seg[k];   }
+
+			t0 = u->pos1 + u->length;  t1 = v->pos1;
+			a0 = u->pos2 + u->length;  a1 = v->pos2;
+			if ((t1 <= t0) || (a1 <= a0)) continue;
+			dt = t1 - t0;
+			dq = a1 - a0;
+			if ((dt > windowSize) || (dq > windowSize)) continue;
+
+			// HSP 不比窗口较短的一边长，分数不超过 长度 × maxSub
+
+			if (((score) min (dt, dq)) * maxSub < innerThreshold)
+				{ tweener_count_stat (numNlWindowsSkipped);  continue; }
+
+			if (nls->strand > 0)
+				{ f0 = a0;  r0 = qFrom + qTo - a1;  r1 = qFrom + qTo - a0; }
+			else
+				{ r0 = a0;  r1 = a1;  f0 = qFrom + qTo - a1; }
+
+			tweener_count_stat (numNlWindows);
+			tweener_add_stat   (nlWindowArea, ((u64) dt) * dq);
+
+			extract_subsequence (target, t0, t1, winT);
+			seq1Positions = build_seed_position_table
+			                  (winT, 0, winT->len, upperCharToBits,
+			                   innerSeed, /*step*/ 1);
+
+			// 反链方向：query 当前就是反向互补状态，直接截取
+
+			extract_subsequence (query, r0, r1, winMinus);
+			search_nl_window (seq1Positions, winMinus);
+			append_shifted   (innerMinus, t0, r0, query->revCompFlags);
+			tweener_add_stat (numNlHsps[0], innerAnchors->len);
+
+			// 正链方向：截取后再反向互补，片段第 i 位对应正链坐标 f0+i
+
+			extract_subsequence (query, r0, r1, winPlus);
+			rev_comp_sequence   (winPlus, qToComplement);
+			search_nl_window (seq1Positions, winPlus);
+			append_shifted   (innerPlus, t0, f0, rcf_forward);
+			tweener_add_stat (numNlHsps[1], innerAnchors->len);
+
+			free_position_table (seq1Positions);
+			}
+		}
+
+	//////////
+	// cleanup
+	//////////
+
+	free_sequence      (winT);
+	free_sequence      (winMinus);
+	free_sequence      (winPlus);
+	free_segment_table (innerAnchors);
+	}
+
+// search_nl_window--
+//	在一个 query 窗口片段里找 HSP，结果放进 innerAnchors（参数同 bounded_align）。
+
+static void search_nl_window
+   (postable*	seq1Positions,
+	seq*		window)
+	{
+	empty_segment_table (innerAnchors);
+	tweenSeq2 = simpleInfo.hp.seq2 = window;	// (collect_inner_hsps 的调试输出用)
+	seed_hit_search (tweenSeq1, seq1Positions,
+	                 window, 0, window->len, /*selfCompare*/ false,
+	                 upperCharToBits, innerSeed,
+	                 /* searchLimit */ 0, 0,
+#ifdef densityFiltering
+	                 /*maxDensity*/ 0.0,
+#endif // densityFiltering
+#ifndef forbidBandWidth
+	                 /*bandWidth*/ 0,
+#endif // not forbidBandWidth
+	                 process_for_simple_hit, (void*) &simpleInfo);
+	}
+
+// append_shifted--
+//	把 innerAnchors 中的 HSP 平移回全局坐标，加进 *dst；id 为所在链方向的
+//	revCompFlags（与 collect_hsps 一致）。
+
+static void append_shifted
+   (segtable**	dst,
+	unspos		shift1,
+	unspos		shift2,
+	int			id)
+	{
+	segment*	seg;
+	u32			ix;
+
+	for (ix=0 ; ix<innerAnchors->len ; ix++)
+		{
+		seg  = &innerAnchors->seg[ix];
+		*dst = add_segment (*dst, shift1 + seg->pos1, shift2 + seg->pos2,
+		                    seg->length, seg->s, id, /*hspId*/ 0);
+		}
+	}
+
+//----------
+//
 // tweener_zero_stats--
 //	Clear the statistics for this module.
 //
@@ -1166,6 +1410,15 @@ void tweener_show_stats
 		fprintf (f, "  avg tweener area: %s\n", commatize((tweenerStats.totalArea / ((float) tweenerStats.numTweeners)) + .5));
 	fprintf (f, "    total coverage: %s bp\n", commatize(tweenerStats.totalCoverage));
 	fprintf (f, "  tweener coverage: %s bp\n", commatize(tweenerStats.tweenerCoverage));
+	if (tweenerStats.numNlWindows + tweenerStats.numNlWindowsSkipped > 0)
+		{
+		fprintf (f, "nlchain inner windows: %s\n", ucommatize(tweenerStats.numNlWindows));
+		fprintf (f, "  windows prescreened: %s\n", ucommatize(tweenerStats.numNlWindowsSkipped));
+		fprintf (f, " inner window area: %s\n", ucommatize(tweenerStats.nlWindowArea));
+		fprintf (f, "  inner HSPs -/+: %s/%s\n", ucommatize(tweenerStats.numNlHsps[0]),
+		                                        ucommatize(tweenerStats.numNlHsps[1]));
+		fprintf (f, "  pass-1 HSPs dropped: %s\n", ucommatize(tweenerStats.numPass1Dropped));
+		}
 	fprintf (f, "-------------------\n");
 #endif // collect_stats
 	}
@@ -1180,6 +1433,15 @@ void tweener_generic_stats
 	(*func) (f, "total_area=%" PRId64 "\n", tweenerStats.totalArea);
 	(*func) (f, "total_coverage=%d\n",      tweenerStats.totalCoverage);
 	(*func) (f, "tweener_coverage=%d\n",    tweenerStats.tweenerCoverage);
+	if (tweenerStats.numNlWindows + tweenerStats.numNlWindowsSkipped > 0)
+		{
+		(*func) (f, "nl_inner_windows=%" PRIu64 "\n",         tweenerStats.numNlWindows);
+		(*func) (f, "nl_inner_windows_skipped=%" PRIu64 "\n", tweenerStats.numNlWindowsSkipped);
+		(*func) (f, "nl_inner_window_area=%" PRIu64 "\n",     tweenerStats.nlWindowArea);
+		(*func) (f, "nl_inner_hsps_minus=%" PRIu64 "\n",      tweenerStats.numNlHsps[0]);
+		(*func) (f, "nl_inner_hsps_plus=%" PRIu64 "\n",       tweenerStats.numNlHsps[1]);
+		(*func) (f, "nl_pass1_dropped=%" PRIu64 "\n",         tweenerStats.numPass1Dropped);
+		}
 #endif // collect_stats
 	}
 

@@ -397,6 +397,7 @@ static const control defaultParams =
 	{ &nlrGapCostMedium,				// nlr: gapCost（跟随 --nlchaingapcost）
 	  5000,								//      minChainScore T_chain (0 => 关闭)
 	  NULL },							//      reportFile
+	-1,-1,								// nlInnerJump, nlInnerSolo
 	NULL,								// nlrReportFilename
 	true,								// gappedExtend
 
@@ -615,6 +616,11 @@ static interval  resolve_chore_target    (chore* chore, seq* target);
 static interval  resolve_chore_query     (seq* query, char strand);
 static void      choose_best_anchors     (u32 numAnchors);
 static score     chain_connect_penalty   (segment* seg1, segment* seg2, int scale);
+static void      append_inner_hsps       (segtable** dst, const segtable* src);
+#ifdef collect_stats
+static segtable* sorted_copy_of_segments (const segtable* st);
+static int       qSegmentsByPosAndLength (const void* segA, const void* segB);
+#endif // collect_stats
 static void      remove_interval_seeds   (unspos b, unspos e, void* info);
 static u32       report_hsps             (void* info,
                                           unspos pos1, unspos pos2, unspos length,
@@ -3541,9 +3547,10 @@ void finish_one_strand
 		dbg_timing_add (debugClockNlRechain);
 		}
 
-	// interpolate between the gapped alignments
+	// interpolate between the gapped alignments；nlchain 下插值已在 gapped 之前
+	// 由 nlchain_both_strands 做过（docs/nlchain_prechain_inner_plan.md）
 
-	if ((alignList != NULL) && (currParams->innerThreshold > 0))
+	if ((alignList != NULL) && (currParams->innerThreshold > 0) && (!currParams->nlchain))
 		{
 		dbg_timing_sub (debugClockInterpolation);
 		alignList = tweener_interpolate
@@ -3737,11 +3744,17 @@ void nlchain_both_strands
 	seq*			query)
 	{
 	nlchainparams	nl = currParams->nl;
+	nlchainparams	nl2;
 	nlchainresult	result = { 0, 0, NULL };
 	segtable*		tables[2];
+	segtable*		innerMinus, *innerPlus;
 	score			hspThresh;
-	u32				originalNumAnchors, t, ix;
+	u32				originalNumAnchors, pass1Len, pass2Len, t, ix;
 	int				haveAny;
+#ifdef collect_stats
+	u8				statsSnapshot[sizeof(nlchainStats)];
+	segtable*		pass1Hsps[2], *pass2Hsps;
+#endif // collect_stats
 
 	tables[0] = anchors;
 	tables[1] = secondaryAnchors;
@@ -3779,6 +3792,10 @@ void nlchain_both_strands
 		merge_segments (secondaryAnchors);
 		}
 
+#ifdef collect_stats
+	memcpy (statsSnapshot, &nlchainStats, sizeof(nlchainStats));
+#endif // collect_stats
+
 	dbg_timing_sub      (debugClockNlChaining);
 	nl_reduce_to_chains (target, query, anchors, secondaryAnchors, &nl, &result);
 	dbg_timing_add      (debugClockNlChaining);
@@ -3787,9 +3804,151 @@ void nlchain_both_strands
 		fprintf (stderr, "(nlchaining reduced %u anchors to %u)\n",
 		                 originalNumAnchors, anchors->len + secondaryAnchors->len);
 
+	// 插值（--inner）：在第一次的主路径上找窗口内的 HSP，并入两张表后再串一次
+	// （docs/nlchain_prechain_inner_plan.md §3）
+
+	if ((currParams->innerThreshold > 0) && (currParams->gappedExtend))
+		{
+		innerMinus = new_segment_table (numDefaultAnchors, 0);
+		innerPlus  = new_segment_table (numDefaultAnchors, 0);
+
+#ifdef collect_stats
+		for (t=0 ; t<2 ; t++)
+			pass1Hsps[t] = sorted_copy_of_segments (tables[t]);
+#endif // collect_stats
+		pass1Len = anchors->len + secondaryAnchors->len;
+
+		dbg_timing_sub (debugClockInterpolation);
+		tweener_collect_nl_hsps (target, query, currParams->scoring->qToComplement,
+		                         currParams->upperCharToBits, currParams->innerSeed,
+		                         currParams->maskedScoring, currParams->xDrop,
+		                         currParams->innerThreshold, currParams->innerWindow,
+		                         &result, anchors, secondaryAnchors,
+		                         &innerMinus, &innerPlus);
+		dbg_timing_add (debugClockInterpolation);
+
+		append_inner_hsps (&anchors,          innerMinus);
+		append_inner_hsps (&secondaryAnchors, innerPlus);
+		if (currParams->mergeAnchors)
+			{
+			merge_segments (anchors);
+			merge_segments (secondaryAnchors);
+			}
+		pass2Len = anchors->len + secondaryAnchors->len;
+
+#ifdef collect_stats
+		memcpy (&nlchainStats, statsSnapshot, sizeof(nlchainStats));
+#endif // collect_stats
+
+		// 第二次串链单独取 J、T_solo，且不比第一次严（docs/nlchain_prechain_inner_plan.md §4.1）
+
+		nl2 = nl;
+		if (currParams->nlInnerJump >= 0) nl2.jumpPen = currParams->nlInnerJump;
+		else nl2.jumpPen = (nl.jumpPen < currParams->innerThreshold / 2)? nl.jumpPen
+		                 : currParams->innerThreshold / 2;
+		if (currParams->nlInnerSolo >= 0) nl2.soloScore = currParams->nlInnerSolo;
+		else nl2.soloScore = (nl.soloScore < 5 * currParams->innerThreshold / 4)? nl.soloScore
+		                   : 5 * currParams->innerThreshold / 4;
+
+		nl_free_result (&result);
+		dbg_timing_sub      (debugClockNlChaining);
+		nl_reduce_to_chains (target, query, anchors, secondaryAnchors, &nl2, &result);
+		dbg_timing_add      (debugClockNlChaining);
+
+#ifdef collect_stats
+		tables[0] = anchors;
+		tables[1] = secondaryAnchors;
+		for (t=0 ; t<2 ; t++)
+			{
+			pass2Hsps = sorted_copy_of_segments (tables[t]);
+			for (ix=0 ; ix<pass1Hsps[t]->len ; ix++)
+				{
+				if (bsearch (&pass1Hsps[t]->seg[ix], pass2Hsps->seg, pass2Hsps->len,
+				             sizeof(segment), qSegmentsByPosAndLength) == NULL)
+					tweener_count_stat (numPass1Dropped);
+				}
+			free_segment_table (pass1Hsps[t]);
+			free_segment_table (pass2Hsps);
+			}
+#endif // collect_stats
+
+		if (dbgShowAnchors)
+			fprintf (stderr, "(nlchain inner: pass 1 kept %u anchors, added %u-/%u+ inner HSPs,"
+			                 " %u after merge, pass 2 kept %u;"
+			                 " J2=" scoreFmtSimple " T_solo2=" scoreFmtSimple ")\n",
+			                 pass1Len, innerMinus->len, innerPlus->len,
+			                 pass2Len, anchors->len + secondaryAnchors->len,
+			                 nl2.jumpPen, nl2.soloScore);
+
+		free_segment_table (innerMinus);
+		free_segment_table (innerPlus);
+		}
+
 	nl_write_report (currParams->nlReportFile, target, query, &result);
 	nl_free_result  (&result);
 	}
+
+// append_inner_hsps--
+//	把插值 HSP 并入单链表。自适应 hspthresh 下 anchors 带 coverageLimit，而
+//	压缩后的表已不是堆、coverage 也是压缩前的值，所以加之前关掉上限，加完后
+//	直接恢复 coverageLimit、coverage、lowScore 三个字段，使 gapped 门槛不受
+//	插值 HSP 影响（docs/nlchain_prechain_inner_plan.md §2.3）。不能调
+//	limit_segment_table 恢复，它会按上限裁表。
+
+static void append_inner_hsps
+   (segtable**		dst,
+	const segtable*	src)
+	{
+	unspos			coverageLimit = (*dst)->coverageLimit;
+	possum			coverage      = (*dst)->coverage;
+	score			lowScore      = (*dst)->lowScore;
+	const segment*	seg;
+	u32				ix;
+
+	(*dst)->coverageLimit = 0;
+	for (ix=0 ; ix<src->len ; ix++)
+		{
+		seg  = &src->seg[ix];
+		*dst = add_segment (*dst, seg->pos1, seg->pos2, seg->length, seg->s,
+		                    seg->id, seg->hspId);
+		}
+
+	(*dst)->coverageLimit = coverageLimit;
+	(*dst)->coverage      = coverage;
+	(*dst)->lowScore      = lowScore;
+	}
+
+#ifdef collect_stats
+
+// sorted_copy_of_segments, qSegmentsByPosAndLength--
+//	numPass1Dropped 的统计用：表的副本按 (pos1, pos2, length) 排序。
+
+static segtable* sorted_copy_of_segments
+   (const segtable*	st)
+	{
+	segtable*		cp;
+
+	cp = new_segment_table (st->len + 1, 0);
+	memcpy (cp->seg, st->seg, st->len * sizeof(segment));
+	cp->len = st->len;
+	qsort (cp->seg, cp->len, sizeof(segment), qSegmentsByPosAndLength);
+	return cp;
+	}
+
+static int qSegmentsByPosAndLength
+   (const void*	segA,
+	const void*	segB)
+	{
+	const segment* a = (const segment*) segA;
+	const segment* b = (const segment*) segB;
+
+	if (a->pos1   != b->pos1)   return (a->pos1   < b->pos1)?   -1 : 1;
+	if (a->pos2   != b->pos2)   return (a->pos2   < b->pos2)?   -1 : 1;
+	if (a->length != b->length) return (a->length < b->length)? -1 : 1;
+	return 0;
+	}
+
+#endif // collect_stats
 
 //----------
 // [[-- a chain connection penalty function --]]
@@ -5502,6 +5661,7 @@ int		formatIsSegments;
 int		formatIsDotPlot;
 int		haveNlchainOption;
 int		haveNlchainClean;
+int		haveNlchainInner;
 
 static void parse_options_loop   (int argc, char** argv,
                                   control* lzParams, control* izParams,
@@ -6172,6 +6332,19 @@ static void parse_options_loop
 			lzParams->nl.soloScore = string_to_score (argStr);
 			if (lzParams->nl.soloScore < 0)
 				chastise ("--nlchainsolo can't be negative\n");
+			haveNlchainOption = true;
+			goto next_arg;
+			}
+
+		if (strcmp_prefix (arg, "--nlchaininner=") == 0)
+			{
+			numFields = split_nlchain_fields (argStr, fields, 2, 1);
+			lzParams->nlInnerJump = string_to_score (fields[0]);
+			if (numFields > 1) lzParams->nlInnerSolo = string_to_score (fields[1]);
+			if ((lzParams->nlInnerJump < 0)
+			 || ((numFields > 1) && (lzParams->nlInnerSolo < 0)))
+				chastise ("--nlchaininner values can't be negative\n");
+			haveNlchainInner  = true;
 			haveNlchainOption = true;
 			goto next_arg;
 			}
@@ -8837,6 +9010,7 @@ static void parse_options
 	haveStep              = false;
 	haveNlchainOption     = false;
 	haveNlchainClean      = false;
+	haveNlchainInner      = false;
 	haveGappedOption      = false;
 	haveHspThreshold      = false;
 	haveGappedThreshold   = false;
@@ -9379,6 +9553,10 @@ static void parse_options
 			chastise ("--nlchain requires scored HSPs (it can't be used with --nogfextend)\n");
 		if ((haveNlchainClean) && (!lzParams->gappedExtend))
 			chastise ("--nlchainclean and --nlchaincleanreport require gapped extension (they can't be used with --nogapped)\n");
+		if ((lzParams->innerThreshold > 0) && (lzParams->selfCompare))
+			chastise ("--nlchain can't be used with both --inner and --self\n");
+		if ((haveNlchainInner) && (lzParams->innerThreshold <= 0))
+			chastise ("--nlchaininner requires --inner\n");
 		}
 
 	if (!lzParams->gappedExtend)

@@ -206,6 +206,8 @@ typedef struct control
 	nlrechainparams nlr;		// (I) gapped 后重新串链的参数
 								//     .. （docs/nlchain_rechain_plan.md）；
 								//     .. minChainScore = 0 表示关闭
+	score		nlInnerJump;	// (I) --nlchaininner 的 J2；-1 => min(J, innerThreshold/2)
+	score		nlInnerSolo;	// (I) --nlchaininner 的 T_solo2；-1 => min(T_solo, 1.25*innerThreshold)
 	char*		nlrReportFilename;//   剥链结果文件名（可为 NULL）
 	int			gappedExtend;	// (I) true => perform gapped extension
 

@@ -15,6 +15,7 @@
 #include "chain.h"				// segment chaining stuff
 #include "gapped_extend.h"		// gapped alignment stuff
 #include "edit_script.h"		// alignment edit script stuff
+#include "nlchain.h"			// non-linear chaining stuff
 
 // establish ownership of global variables
 
@@ -38,6 +39,11 @@ global struct
 	u64   totalArea;
 	int   totalCoverage;
 	int   tweenerCoverage;
+	u64   numNlWindows;			// nlchain 插值：实际搜索的窗口数
+	u64   numNlWindowsSkipped;	// nlchain 插值：被无损预筛跳过的窗口数
+	u64   nlWindowArea;			// nlchain 插值：搜索窗口的面积和
+	u64   numNlHsps[2];			// nlchain 插值：找到的 HSP 数，0 反链，1 正链
+	u64   numPass1Dropped;		// 第一次主路径 HSP 在第二次串链中被丢掉的数目
 	} tweenerStats;
 
 // stats macros
@@ -73,6 +79,13 @@ alignel* tweener_interpolate (alignel* a, seq* seq1, seq* seq2,
                               score yDrop, int trimToPeak, score scoreThresh,
                               score diagPen, score antiPen,
                               int scale, chainer connect, u32 windowSize);
+void     tweener_collect_nl_hsps (seq* target, seq* query, const u8* qToComplement,
+                              const s8 upperCharToBits[], seed* innerSeed,
+                              scoreset* maskedScoring, score xDrop,
+                              score innerThreshold, u32 windowSize,
+                              const nlchainresult* r,
+                              const segtable* stMinus, const segtable* stPlus,
+                              segtable** innerMinus, segtable** innerPlus);
 
 #undef global
 #endif // tweener_H

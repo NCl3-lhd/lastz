@@ -232,6 +232,7 @@ cand(j,i) = R[j] + s_i - P_J(j,i) ≤ R[j] + s_i - J
    - 进入方式 `jumpIn`：`S` 起点；`I` 换向（倒位）；`T` 换分区（易位/跨染色体）；`D` 同向回跳（dt < 0，串联重复或重复）；`G` 同向长间隔（大 indel 或 query/target 特有插入）。
 4. **次级链**：按 §5.4 的 1–6 步，沿 L 状态的前驱 `predL` 回溯。每条次级链只有一段，`jumpIn = S`，标记为 secondary。
 5. **筛 HSP**：主路径和保留的次级链上的 HSP `filter=false`，其余 `filter=true`，调用 `filter_marked_segments`。
+5′. **插值（`--inner`，2026-11-03）**：`innerThreshold > 0` 且做 gapped 时，在第一次的主路径上，对每段内相邻两个 HSP 之间的窗口（target、query 两边都 > 0 且 ≤ `--inner` 的窗口大小；只看主路径，不看次级链段，主路径两端不外延）用 7-mer 种子找 HSP，正反两个方向都搜：query 此时处于反向互补状态，反链方向直接截取窗口，正链方向截取后再反向互补。`min(dq, dt) × 单列最高分 < innerThreshold` 的窗口不可能出达标的 HSP，直接跳过（无损预筛）。新 HSP 按方向并入两张表、各自 merge，再串一次链；第二次用 J2 = min(J, ⌊innerThreshold/2⌋)、T_solo2 = min(T_solo, ⌊5·innerThreshold/4⌋)（§8.3），对第二次的所有 HSP 生效。返回的段表和压缩后的表都来自第二次。实现在 `src/tweener.c` 的 `tweener_collect_nl_hsps` 和 `src/lastz.c` 的 `nlchain_both_strands`，方案见 `docs/nlchain_prechain_inner_plan.md`。
 6. **两条链各自 gapped**：两张表在 DP 之前已经拆开（§8.2 第 5 步），DP 后直接沿用现有流程：反链表在 `anchors`、正链表在 `secondaryAnchors`，先对反链调用 `finish_one_strand`，`swap_anchor_sets` 后再对正链调用（`reduce_to_points` → `gapped_extend` → 过滤 → 输出）。`finish_one_strand` 里会再做一次 `merge_segments`，对已合并的单链表无副作用。nlchain 打开时 `finish_one_strand` 不进入自身的 `try_reduce_to_chain`（两者互斥）。
 7. **（可选）段表输出**：`--nlchainreport=<file>` 写出 TSV（primary/secondary、链号、段号、jumpIn、p、σ、q/t 区间、段分数、HSP 数），用于诊断、断点分析，以及按主链/全部链分别评测。
 8. **gapped 之后重新串链（方案 A，2026-11-02）**：每次 `finish_one_strand` 中 gapped 比对过滤之后、插值和输出之前，把该链方向的比对拆成无 gap 块，按 axtChain 的模型重新串链，删掉链分低于 T_chain（`--nlchainclean`，默认 5000）的链，再在被删处切开原比对输出。实现在 `src/nlrechain.c`，算法见 `docs/nlchain_rechain_plan.md` §2，实现记录见 `docs/nlchain_progress.md` §9。
@@ -344,6 +345,11 @@ typedef struct nlstate			// 一个 HSP 的全部 DP 状态
 7. `--stats`：增加 HSP 数、主路径段数、各类 jumpIn 计数、次级链数及其 HSP 数、H_max 截断次数、DP 用时（`dbg_timing` 新增 `debugClockNlChaining`）。
 8. 不加 `--nlchain` 时，代码路径与现在完全一致，输出逐字节不变。
 9. （方案 A，2026-11-02）`lastzParams` 增加 `nlrechainparams nlr` 和 `nlrReportFilename`；CLI 增加 `--nlchainclean=<T_chain>`、`--nlchaincleanreport=<file>`；`--nlchaingapcost` 同时选重新串链的三行代价表；`finish_one_strand` 在过滤之后调用 `nl_rechain_aligns`（`T_chain > 0` 时）。`--nlchainclean=0` 时输出与此前的 nlchain 逐字节一致。
+10. （gapped 之前插值，2026-11-03）`nlchain_both_strands` 在第一次 `nl_reduce_to_chains` 之后调用 `tweener_collect_nl_hsps`，把插值 HSP 并入两张表、各自 merge 后再串一次（§7 第 5′ 步）；nlchain 下 `finish_one_strand` 不再调用 `tweener_interpolate`。`lastzParams` 增加 `nlInnerJump`、`nlInnerSolo`；CLI 增加 `--nlchaininner=<J2>[,<T_solo2>]`（显式值不再与外层取 min，只给 J2 时 T_solo2 按推导取值）。
+    - D7：`--nogapped` 时跳过插值。`--inner` 与 `--nogapped` 本来就互斥（"--inner requires --gapped"），这里的判断只作防御。
+    - D8：`--nlchain --inner --self` 报错；`--nlchaininner` 要求 `--inner`，取值不能为负。
+    - D9：并入插值 HSP 前保存 `coverageLimit`、`coverage`、`lowScore`，加完后直接赋值恢复，使自适应 hspthresh 下 `finish_one_strand` 的 gapped 门槛（`lowAnchorScore`）不受插值 HSP 影响。
+    - `--stats`：`nlchainStats` 只反映第二次串链（第二次前恢复第一次前的快照）；插值窗口数、预筛跳过的窗口数、窗口面积、插值 HSP 数（反/正）、第一次主路径 HSP 在第二次被丢掉的数目（numPass1Dropped）记在 `tweenerStats`。
 
 ### 8.3 默认值（已在 Alignathon simTest 上调定，2026-11-01）
 
@@ -360,6 +366,8 @@ typedef struct nlstate			// 一个 HSP 的全部 DP 状态
 | T_src | 0（关闭） | 不变 | |
 | f_ov | 0.5 | 不变 | 与 minimap2 mask_level 一致 |
 | H_max | 1000 | 不变 | |
+| J2（第二次串链，`--inner`） | — | **min(J, ⌊innerThreshold/2⌋)**，暂定，待 `nlchain_prechain_inner_plan.md` §8 扫描 | 10 kb 以内的空隙，孤立倒位片段进入主路径的门槛落在 T_chain（5000）以下（该方案 §4.1） |
+| T_solo2（第二次串链，`--inner`） | — | **min(T_solo, ⌊5·innerThreshold/4⌋)**，暂定，同上 | 与外层"T_solo = 1.25 × hspthresh"同形，挡偏离对角线的随机插值 HSP；不随 J2 减半 |
 | T_sec / N_sec / r_sec | 2 × hspthresh / 5 / 0.5 | **0（关闭）/ 1 / 0.9**；需要旁系拷贝时推荐 T_sec = 4 × hspthresh | T_sec 理由同 T_solo：单个刚过门槛的 HSP 不应单独成为次级链。N_sec、r_sec 取 minimap2 的 `-N 5`、`-p 0.8` 的量级，r_sec 放宽到 0.5 以保留分化较大的旁系拷贝 |
 
 T_solo、T_sec **不与 gappedthresh 挂钩**：没给 `--gappedthresh` 时 lastz 令它等于 hspthresh（`lastz.c:9347`），Human–Mouse 用的又是 lastz 默认参数，两者都是 3000，挂钩等于没设门槛。hspthresh 为自适应（`--hspthresh=top...`）时，J、T_solo 中的 hspthresh 改用本次收集到的最低 HSP 分（与 `finish_one_strand` 里 `lowAnchorScore` 的口径相同）。
@@ -447,3 +455,8 @@ T_solo、T_sec **不与 gappedthresh 挂钩**：没给 `--gappedthresh` 时 last
 1. λ 改为 1000、D0 改为 3000、T_solo 改为 1.25 × hspthresh：noparalogy 真值上的平均 F 从 0.7060 升到 0.7085，10 个物种对全部提高。
 2. 次级链默认关闭（T_sec = 0），N_sec、r_sec 的默认值改为 1、0.9：次级链在每个物种对上都降低 noparalogy F，ancestor F 的收益只有 +0.001 ~ +0.003。T_sec 不再按 hspthresh 自动换算。
 3. 其余参数不变；maxGap、maxDiag 在 test set 上不起作用。与 chainNet 的剩余差距来自 gapped 延伸越出段边界，调参解决不了。
+
+**2026-11-03，gapped 之前插值。** 按 `docs/nlchain_prechain_inner_plan.md` 实施，取代未实施的 `docs/nlchain_inner_plan.md`：
+
+1. nlchain 下的 `--inner` 改到 gapped 之前：在第一次串链的主路径上，段内相邻 HSP 之间的窗口里正反两个方向找 HSP，并入后再串一次链（§7 第 5′ 步、§8.2 第 10 条）。插值得到的比对因此也要经过 gapped 门槛和 T_chain；旧的 gapped 之后插值在 nlchain 下不再运行。
+2. 第二次串链单独取 J2、T_solo2（§8.3），新选项 `--nlchaininner` 可覆盖。默认值是暂定的，由该方案 §8 的远端实验决定。
