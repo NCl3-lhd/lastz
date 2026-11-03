@@ -3840,15 +3840,12 @@ void nlchain_both_strands
 		memcpy (&nlchainStats, statsSnapshot, sizeof(nlchainStats));
 #endif // collect_stats
 
-		// 第二次串链单独取 J、T_solo，且不比第一次严（docs/nlchain_prechain_inner_plan.md §4.1）
+		// 第二次串链默认沿用第一次的 J、T_solo，--nlchaininner 可单独覆盖
+		// （simTest 上 J2 降低没有收益，见 docs/nlchain_progress.md §12）
 
 		nl2 = nl;
-		if (currParams->nlInnerJump >= 0) nl2.jumpPen = currParams->nlInnerJump;
-		else nl2.jumpPen = (nl.jumpPen < currParams->innerThreshold / 2)? nl.jumpPen
-		                 : currParams->innerThreshold / 2;
+		if (currParams->nlInnerJump >= 0) nl2.jumpPen   = currParams->nlInnerJump;
 		if (currParams->nlInnerSolo >= 0) nl2.soloScore = currParams->nlInnerSolo;
-		else nl2.soloScore = (nl.soloScore < 5 * currParams->innerThreshold / 4)? nl.soloScore
-		                   : 5 * currParams->innerThreshold / 4;
 
 		nl_free_result (&result);
 		dbg_timing_sub      (debugClockNlChaining);

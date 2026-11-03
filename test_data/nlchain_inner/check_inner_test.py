@@ -15,6 +15,9 @@ import sys
 PARAMS = ("--nlchain --hspthresh=50000 --gappedthresh=3000"
           " --nlchainjump=3000 --nlchainsolo=3750 --inner=2000").split()
 FMT = "--format=general:name1,strand1,zstart1,end1,name2,strand2,zstart2+,end2+,score"
+# 第二次串链默认沿用第一次的 J、T_solo（D6 取 a）；X 的分数按 b2 档校准，
+# 要让 X 进入主路径需显式给 b2 档的值
+B2 = ["--nlchaininner=1000,2500"]
 
 failures = 0
 
@@ -78,33 +81,37 @@ def main():
     Q = e["Q"]
     X_t, X_q, W_t, W_q = e["X_t"], e["X_q"], e["W_t"], e["W_q"]
 
-    # 1. 推导值（J2 = 1000，T_solo2 = 2500）
-    al, segs, body_b2 = run(o.lastz, d, "target.fa", "query.fa", [])
+    # 1. b2 档（J2 = 1000，T_solo2 = 2500）
+    al, segs, body_b2 = run(o.lastz, d, "target.fa", "query.fa", B2)
     exp_segs = [
         ("query", "S", "target", "+", e["A_q"][0], W_q[1], e["A_t"][0], W_t[1], 2),
         ("query", "I", "target", "-", X_q[0], X_q[1], X_t[0], X_t[1], 1),
         ("query", "I", "target", "+", e["B_q"][0], e["B_q"][1], e["B_t"][0], e["B_t"][1], 1),
     ]
-    check(segs == exp_segs, "推导值：段表为 S + A..W、I - X、I + B，坐标与构造一致")
-    check(has_align(al, "-", X_t, X_q), "推导值：输出中有 X 的反链比对")
-    check(not overlaps_W(al, e), "推导值：W 的 gapped 分 < 3000，不输出")
+    check(segs == exp_segs, "b2：段表为 S + A..W、I - X、I + B，坐标与构造一致")
+    check(has_align(al, "-", X_t, X_q), "b2：输出中有 X 的反链比对")
+    check(not overlaps_W(al, e), "b2：W 的 gapped 分 < 3000，不输出")
     segs_b2 = segs
 
     # 2. 降 gapped 门槛后 W 出现
-    al, _, _ = run(o.lastz, d, "target.fa", "query.fa", ["--gappedthresh=2000"])
+    al, _, _ = run(o.lastz, d, "target.fa", "query.fa", B2 + ["--gappedthresh=2000"])
     check(has_align(al, "+", W_t, W_q), "--gappedthresh=2000：W 出现在输出中")
 
-    # 3. D6a：第二次与第一次取同样的 J、T_solo
-    al, segs, _ = run(o.lastz, d, "target.fa", "query.fa", ["--nlchaininner=3000,3750"])
+    # 3. 默认（D6a）：第二次与第一次取同样的 J、T_solo
+    al, segs, body_a = run(o.lastz, d, "target.fa", "query.fa", [])
     check(segs == [("query", "S", "target", "+", e["A_q"][0], e["B_q"][1],
                     e["A_t"][0], e["B_t"][1], 3)],
-          "--nlchaininner=3000,3750：只有一段 S + A..B（含 W，3 个 HSP），没有 X")
+          "默认：只有一段 S + A..B（含 W，3 个 HSP），没有 X")
     check(not has_align(al, "-", X_t, X_q) and not overlaps_W(al, e),
-          "--nlchaininner=3000,3750：输出中没有 X、没有 W")
+          "默认：输出中没有 X、没有 W")
+    segs_a = segs
+    al, segs, body = run(o.lastz, d, "target.fa", "query.fa", ["--nlchaininner=3000,3750"])
+    check(body == body_a and segs == segs_a, "--nlchaininner=3000,3750：与默认逐字节一致")
 
-    # 4. 只给 J2：T_solo2 仍按推导取值，结果与推导值逐字节一致
+    # 4. 只给 J2：T_solo2 沿用第一次的 T_solo
     al, segs, body = run(o.lastz, d, "target.fa", "query.fa", ["--nlchaininner=1000"])
-    check(body == body_b2 and segs == segs_b2, "--nlchaininner=1000：与推导值逐字节一致")
+    _, segs2, body2 = run(o.lastz, d, "target.fa", "query.fa", ["--nlchaininner=1000,3750"])
+    check(body == body2 and segs == segs2, "--nlchaininner=1000：与 --nlchaininner=1000,3750 逐字节一致")
 
     # 5. d9db595：旧 tweener
     if o.base:
@@ -113,23 +120,23 @@ def main():
         check(has_align(al, "+", W_t, W_q), "d9db595：W 由旧 tweener 输出")
 
     # 6. query 整体反向互补
-    al_rc, segs, _ = run(o.lastz, d, "target.fa", "query_rc.fa", [])
+    al_rc, segs, _ = run(o.lastz, d, "target.fa", "query_rc.fa", B2)
     flip = {"+": "-", "-": "+"}
     exp_rc = []
     for k, s in enumerate(reversed(exp_segs)):
         exp_rc.append((s[0], "S" if k == 0 else "I", s[2], flip[s[3]], Q - s[5], Q - s[4],
                        s[6], s[7], s[8]))
     check(segs == exp_rc, "query 反向互补：段表 σ 对调、坐标与正向运行一致")
-    al_fw, _, _ = run(o.lastz, d, "target.fa", "query.fa", [], report=False)
+    al_fw, _, _ = run(o.lastz, d, "target.fa", "query.fa", B2, report=False)
     mapped = set((a[0], a[1], a[2], a[3], a[4], flip[a[5]], Q - a[7], Q - a[6]) for a in al_fw)
     check(al_rc == mapped, "query 反向互补：比对坐标与正向运行一致")
 
     # 7. target [multiple]（构造在第二条序列上）
-    al, segs, body = run(o.lastz, d, "target_multi.fa[multiple]", "query.fa", [])
+    al, segs, body = run(o.lastz, d, "target_multi.fa[multiple]", "query.fa", B2)
     check(segs == segs_b2 and body == body_b2, "target [multiple]：段表与比对与单条 target 一致")
 
     # 8. query [multiple]（构造在第二条 query 上）
-    al, segs, body = run(o.lastz, d, "target.fa", "query_multi.fa[multiple]", [])
+    al, segs, body = run(o.lastz, d, "target.fa", "query_multi.fa[multiple]", B2)
     check(segs == segs_b2 and body == body_b2, "query [multiple]：段表与比对与单独跑这条 query 一致")
 
     # 9. 自适应 hspthresh（不显式给 --gappedthresh，gapped 门槛取 lowAnchorScore）。
@@ -140,7 +147,7 @@ def main():
     saved = PARAMS[:]
     PARAMS[:] = [p for p in saved if not p.startswith(("--hspthresh", "--gappedthresh"))] \
                 + ["--hspthresh=top50%"]
-    al, segs, _ = run(o.lastz, d, "target.fa", "query.fa", [])
+    al, segs, _ = run(o.lastz, d, "target.fa", "query.fa", B2)
     PARAMS[:] = [p for p in PARAMS if not p.startswith("--inner")]
     al0, _, _ = run(o.lastz, d, "target.fa", "query.fa", [], report=False)
     PARAMS[:] = saved
@@ -154,7 +161,7 @@ def main():
     if o.stats:
         st = os.path.join(d, "_stats.txt")
         subprocess.run([o.stats, os.path.join(d, "target.fa"), os.path.join(d, "query.fa")]
-                       + PARAMS + [FMT, "--stats=" + st], capture_output=True, check=True)
+                       + PARAMS + B2 + [FMT, "--stats=" + st], capture_output=True, check=True)
         txt = open(st).read()
         want = ["nlchain inner windows: 1", "windows prescreened: 0",
                 "inner HSPs -/+: 1/1", "pass-1 HSPs dropped: 0", "nlchain HSPs: 4"]

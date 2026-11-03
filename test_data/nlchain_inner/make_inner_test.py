@@ -35,6 +35,7 @@ XDROP = 910
 # 测试参数（与 check_inner_test.py 一致）
 J1, TSOLO1 = 3000, 3750          # 第一次串链：--nlchainjump=3000 --nlchainsolo=3750
 INNER = 2000                     # --inner=2000
+# b2 档（check_inner_test.py 用 --nlchaininner=1000,2500 显式给出；默认的 a 档沿用 J1、TSOLO1）
 J2, TSOLO2 = min(J1, INNER // 2), min(TSOLO1, 5 * INNER // 4)
 LAMBDA, D0, LCAP = 1000, 3000, 8  # nlchain 默认 λ、D0、L
 

@@ -4,7 +4,7 @@
 
 **2026-11-02**：方案 A（gapped 之后重新串链 + 链分下限，`docs/nlchain_rechain_plan.md`）的本地实现和验证已完成（实施方案 §4 第 1–6 步），见 §9；尚未提交，远端对拍和评测（第 7–8 步）尚未做。
 
-**2026-11-03**：nlchain 模式下 gapped 之前做正反两链插值（`docs/nlchain_prechain_inner_plan.md`）的本地实现和验证已完成（该方案 §7 第 1–4 步），见 §11；尚未提交，远端实验（第 5 步，该方案 §8）尚未做。
+**2026-11-03**：nlchain 模式下 gapped 之前做正反两链插值（`docs/nlchain_prechain_inner_plan.md`）的本地实现和验证已完成（该方案 §7 第 1–4 步），见 §11，已在 19fa9e5 提交；远端实验（第 5 步，该方案 §8）已完成，见 §12：`--inner=2000` 使 F_np/F_anc 各升约 0.01，再把 gapped 门槛降到 2000 再升约 0.009；补跑的 G3a（D6 取 a 并降门槛）F_np 0.7422、F_anc 0.7355，且没有可见开销。据此 D6 默认改为 a（第二次串链沿用外层 J、T_solo），gapped 门槛不改代码、在文档中推荐与 `--inner` 同值（§12.6）。
 
 ## 1. 已完成
 
@@ -469,3 +469,137 @@ python3 test_data/nlchain_inner/check_inner_test.py <新 lastz> <数据目录> [
 2. 服务器构建：仿照 `scripts/bootstrap_nlr.sh`，从提交后的版本 `git archive` 构建正式版（gcc 13，`-Werror`）和 `-Dcollect_stats -DdbgTiming` 版，sha256 记入 MANIFEST；先跑 `make base_tests`、`nlchain_test`、`nlrechain_test`。远端坑见记忆文件（tar 关 xattr、ssh 后台启动包子 shell）。
 3. 在 simTest 20 个作业上跑方案 §8 的各组：G0（新，`--nlchain`，应与 `nlr_default` 逐字节一致，只差命令行回显）、G1（d9db595，`--nlchain --inner=2000`；d9db595 与 8e9f350 的 `src/` 相同，可直接用服务器上的 `bin/lastz_nlr`）、G2（新，`--inner=2000`，b2）、G2b1（`--nlchaininner=2000,2500`）、G2a（`--nlchaininner=2200,2750`）、G3（`--inner=2000 --gappedthresh=2000`）、G3b（只加 `--gappedthresh=2000`）、G2p（统计版，同 G2），可选 G4（方案 B 补丁二进制，不提交）。参数组写进 `config/tune_groups.tsv`，评测和汇总同 §10.3。
 4. 比较 R/P/F（np、anc）、tMul/qMul、CPU、插值与 nlchaining 耗时；插值窗口数、预筛比例、插值 HSP 数；`--nlchainreport` 中的 I 段数（G2/G2b1/G2a 对 G0）；G2p 的 numPass1Dropped。按方案 §8 的判定规则决定 D6 的默认值、是否把 gapped 门槛默认降到 innerThreshold、是否改用方案 B。
+
+## 12. gapped 之前插值：远端实验（方案 §8，2026-11-03）
+
+服务器与目录同 §10（`PROJECT_ROOT`）。实现已在 19fa9e5 提交。汇总：`results/nlr/nli_report.txt`（R/P/F）、`results/nlr/nli_stats.txt`（段表与 G2p 计数）；补跑的 G3a 见 12.5，默认值的决定与验证见 12.6，汇总在 `results/nlr/nli_report_g3a.txt`。
+
+### 12.1 构建与测试
+
+- 源码：`git archive 19fa9e5` 解到 `external/lastz-19fa9e5`（上传后核对 md5）。构建脚本 `scripts/bootstrap_nli.sh`，由 `bootstrap_nlr.sh` 改来，sha256 记在 `bin/MANIFEST_nli.tsv`：
+  - `bin/lastz_nli`：正式版，`-Werror`，gcc 13.1，sha256 `522ac491…a4fd95`。
+  - `bin/lastz_nli_prof`：`-Dcollect_stats -DdbgTiming`，sha256 `0862a719…f0a5d0`。5 条警告都在原有文件里（`gapped_extend.c` 2、`pos_table.c` 2、`quantum.c` 1），与本地相同；脚本检查 `nl*.c`、`tweener.c`、`lastz.c` 没有警告。
+- 测试（`build/nli_tests/`）：`nlrechain_test` 2,929,359 项检查 0 失败；`nlchain_test` 518,512 项检查 0 失败；`base_tests` 19 项 SUCCESS；`lastz_D` 加 `-Werror` 通过；构建日志无 warning。
+- 冒烟（pseudocat vs pseudopig，simTest 参数）：两版在 `--nlchain` 和 `--nlchain --inner=2000` 下输出与清洗报告都一致。`--inner` 下窗口 33 个，预筛跳过 3 个，插值 HSP 反/正 = 32/1，numPass1Dropped = 1（本地默认参数下为 0，参数不同）。
+
+### 12.2 运行
+
+- 参数组 `nli_g0`、`nli_g1`、`nli_g2`、`nli_g2b1`、`nli_g2a`、`nli_g3`、`nli_g3b`、`nli_g2p` 加在 `config/tune_groups.tsv` 末尾，原文件备份在 `logs/tune_groups.tsv.bak_nli`。G3/G3b 的 `--gappedthresh=2000` 写在公共参数的 `--gappedthresh=6000` 之后，lastz 取后一个。G2p 加 `--stats`（不带文件名时写 stderr，与计时在一起）。
+- 运行脚本 `logs/nli_run.sh`、`logs/nli_run2.sh`：G0、G2、G2b1、G2a、G3、G3b 共 120 个作业并行；G2p 单独以 20 个作业并行；评测同 §10.3。`results/tune/long.tsv` 运行前备份为 `logs/long.tsv.bak_nli`。
+- **G1 没有结果**：`bin/lastz_nlr`（8e9f350，与 d9db595 的 `src/` 相同）加 `--nlchain --inner=2000`，20 个作业全部以 `FAILURE: outer alignments out of order` 退出。原因是 `nl_rechain_aligns` 之后比对表不再按 beg1 排序，而 `tweener.c` 默认定义了 `verifyOrDie`，`tweener_interpolate` 入口检查到乱序就退出。重新串链之前的 `lastz_nl_step5`、`lastz_nl` 跑同一个作业正常。这是 8e9f350 引入、19fa9e5 已绕开的问题（nlchain 下不再调用 `tweener_interpolate`），§9.2 的小数据回归没有触发。用户决定不与旧版比较，G1 不再补跑；判定规则中"高于 G1"一条去掉。G4 按用户决定不做。
+- **G0 = `nlr_default`**：20 个作业的 MAF（去掉 `#` 行）和段表逐字节一致。**G2p = G2**：同样逐字节一致。
+
+### 12.3 准确度
+
+| 组 | 参数（公共参数之外） | R_np | P_np | F_np | R_anc | P_anc | F_anc | tMul / qMul | MAF 块数 |
+|---|---|---|---|---|---|---|---|---|---|
+| G0 `nli_g0` | `--nlchain` | 0.7492 | 0.7022 | 0.7247 | 0.6632 | 0.7819 | 0.7167 | 0.016 / 0.009 | 54,860 |
+| G2 `nli_g2` | `--inner=2000`（b2：J2=1000，T_solo2=2500） | 0.7669 | 0.7040 | 0.7340 | 0.6788 | 0.7842 | 0.7272 | 0.018 / 0.010 | 60,218 |
+| G2b1 | `--inner=2000 --nlchaininner=2000,2500` | 0.7663 | 0.7042 | 0.7338 | 0.6783 | 0.7843 | 0.7269 | 0.018 / 0.010 | — |
+| G2a | `--inner=2000 --nlchaininner=2200,2750` | 0.7661 | 0.7042 | 0.7338 | 0.6781 | 0.7843 | 0.7268 | 0.018 / 0.010 | — |
+| **G3** | `--inner=2000 --gappedthresh=2000`（b2） | 0.7773 | 0.7110 | **0.7426** | 0.6882 | 0.7922 | **0.7360** | 0.020 / 0.012 | 78,091 |
+| G3b | `--gappedthresh=2000` | 0.7536 | 0.7053 | 0.7284 | 0.6672 | 0.7854 | 0.7206 | 0.017 / 0.009 | 62,597 |
+| chainNet medium/3000 | — | 0.7505 | 0.6930 | 0.7205 | 0.6696 | 0.7780 | 0.7191 | 0.000 / 0.016 | — |
+
+- **G2 有效**：F_np +0.0093、F_anc +0.0105（对 G0），10/10 个物种对两项都不低于 G0。收益主要来自 recall（R_np +0.018），P_np 也略升（+0.0018），没有出现 §9 担心的 precision 下降。远缘物种对收益更大（Cow-Rat F_np +0.021，Mouse-Rat +0.0003）。
+- **D6 三档几乎相同**：G2、G2b1、G2a 的 F_np 相差 0.0002，F_anc 相差 0.0004，都在判定线 0.001 之内。按方案 §8 的规则取 a（第二次与外层同用 J、T_solo）。b2 两项略高，但差值远小于判定线。
+- **降低 gapped 门槛收益更大**：G3 对 G2 再加 F_np +0.0086、F_anc +0.0088，P 也升（P_np +0.007）。G3b 单独降门槛只有 +0.0037/+0.0039，所以 G3 的增量主要来自插值 HSP 不再被 6000 的 gapped 门槛挡掉（§2.2 的 D5a 问题）。
+- G3 在 10/10 个物种对上 F_np、F_anc 都高于 chainNet medium/3000。
+
+### 12.4 段表、计数与耗时
+
+主路径段数（10 对合计，`nli_stats.py`）：
+
+| 组 | D | G | I | I 段 query bp |
+|---|---|---|---|---|
+| G0 | 2,764 | 2,520 | 8,173 | 43.6 M |
+| G2 / G3 | 8,785 | 10,360 | 12,837 | 25.3 M |
+| G2b1 | 3,595 | 2,816 | 11,003 | 44.8 M |
+| G2a | 3,277 | 2,579 | 10,491 | 46.2 M |
+
+- G3 与 G2、G3b 与 G0 的段表统计相同（gapped 门槛不影响串链）。
+- 插值让 I 段增加 28%（G2a）到 57%（G2）。b2 下 J2=1000 把主路径切得更碎（G 段 ×4），I 段覆盖的碱基反而减少，所以 G2 的 I 段数不能与其他组直接比较（§11.4 已预见）。
+
+G2p（20 个作业合计，对照 `nlr_default_prof`，§10.3）：
+
+| 项 | nlr_default_prof | G2p |
+|---|---|---|
+| 插值窗口 / 预筛跳过 | — | 221,015 / 53,792（19.6%） |
+| 插值 HSP 反 / 正 | — | 79,229 / 117,072 |
+| numPass1Dropped | — | 43 |
+| gapped extensions | 100,926 | 129,178（+28%） |
+| interpolation (s) | 0.0 | 3.0（占 total 0.18%） |
+| nlchaining (s) | 4.3 | 10.9（两次串链，占 0.66%） |
+| nlchain rechaining (s) | 3.1 | 3.5 |
+| gapped extension (s) | 223.3 | 277.7 |
+| seed hit search (s) | 1178.4 | 1320.6 |
+| total run time (s) | 1436.9 | 1647.8 |
+
+- 插值和两次串链本身合计约 10 s，不到 1%。主要的新增开销是 gapped 延伸：次数 +28%，约 +55 s（约 4%）。
+- total 多出的 211 s 中有 142 s 在 seed hit search，这一段代码没有改，是服务器负载差异（两次运行时负载不同）。CPU 一列（G0 1775 s 对 `nlr_default` 1678 s，二者输出相同）也有同样的漂移，所以组间 CPU 不可直接比较。
+- 预筛跳过比例随物种距离下降：Mouse-Rat 47%，Cow-Rat 3.6%。
+- numPass1Dropped 合计 43（每对 1–9），次级链关闭。少量第一次主路径上的 HSP 在第二次串链中没有留在主路径上，与 §9"第二次串链改变主路径"一致；数量相对 120 万个 HSP 可忽略，没有逐个核实。
+- G3 没有统计版，gapped 延伸增加多少没有测量（MAF 块数 78k 对 G2 60k）。
+
+### 12.5 补跑：G3a 与降门槛的开销
+
+G3 用的是 b2，而 D6 按规则应取 a，所以补跑三组（`logs/nli_run3.sh`）：
+
+- `nli_g3a`：`--inner=2000 --gappedthresh=2000 --nlchaininner=2200,2750`，正式版。
+- `nli_g3ap`：同 G3a，统计版；与 G3a 的 MAF（去掉 `#` 行）逐字节一致。
+- `nli_g2ap`：同 G2a，统计版。与 G3ap 同批各 20 个作业并行，两组只差 gapped 门槛，负载相同，耗时可以直接比较。
+
+| 组 | R_np | P_np | F_np | R_anc | P_anc | F_anc | tMul / qMul | MAF 块数 |
+|---|---|---|---|---|---|---|---|---|
+| G3（b2） | 0.7773 | 0.7110 | 0.7426 | 0.6882 | 0.7922 | 0.7360 | 0.020 / 0.012 | 78,091 |
+| **G3a**（a） | 0.7761 | 0.7113 | **0.7422** | 0.6870 | 0.7925 | **0.7355** | 0.019 / 0.011 | 77,364 |
+
+- G3a 与 G3 相差 F_np 0.0004、F_anc 0.0005，在判定线 0.001 之内。D6 取 a 不损失降门槛的收益。
+- G3a 在 10/10 个物种对上 F_np、F_anc 都高于 G0、G2a 和 chainNet medium/3000。
+
+| 项（20 个作业合计） | G2ap（门槛 6000） | G3ap（门槛 2000） |
+|---|---|---|
+| gapped extensions | 126,170 | 123,606 |
+| gapped extension (s) | 259.0 | 256.8 |
+| interpolation (s) | 2.9 | 2.9 |
+| nlchaining (s) | 10.3 | 10.4 |
+| nlchain rechaining (s) | 3.2 | 3.4 |
+| total run time (s) | 1436.7 | 1448.8 |
+| numPass1Dropped | 55 | 55 |
+
+- **降门槛没有可见的开销**：gapped 延伸次数反而少 2%，total 相差 0.8%（seed hit search 也差 13 s，属于噪声）。gapped 门槛只决定延伸后的比对留不留，不决定做不做延伸；次数变少的原因推测是留下的比对更多，后续落在其中的 HSP 被跳过，没有核实。
+- D6 取 a 时 numPass1Dropped 为 55（b2 下为 43），说明第一次主路径 HSP 在第二次被丢掉与 J2 的取值无关，来自第二次串链改走了别的路径。
+- G2ap 的计数与 G2p 相同（窗口、插值 HSP 只取决于第一次串链和 `--inner`）。
+
+### 12.6 定默认值（用户决定，2026-11-03）
+
+- **D6 取 a**：未给 `--nlchaininner` 时，第二次串链沿用第一次的 J、T_solo（`src/lastz.c` `nlchain_both_strands`，删掉 min(J, innerThreshold/2)、min(T_solo, 1.25·innerThreshold) 的推导；`lastz.h` 注释同步）。`--nlchaininner` 保留，只给 J2 时 T_solo2 沿用外层的 T_solo。
+- **gapped 门槛：代码不改（G-1）**。simTest、UCSC 式参数都显式给 `--gappedthresh`，而显式参数优先，"未给时默认降到 innerThreshold"对这些流程不起作用。改为在 `nlchain_design.md` §8.3 推荐 `--inner` 时同时给 `--gappedthresh=<innerThreshold>`。没有显式给 gapped 门槛的配置（G-2）没有实验数据，不改。
+- 构造测试数据不变（X 按 b2 档校准）。`check_inner_test.py` 中依赖 X 进入主路径的各项改为显式传 `--nlchaininner=1000,2500`；"默认"一项改为检查 a 的行为（只有一段 `S + A…B`，没有 X、W），并与 `--nlchaininner=3000,3750` 逐字节一致；"只给 J2"一项改为与 `--nlchaininner=1000,3750` 逐字节一致。
+- 文档：`nlchain_design.md` 第 5′ 步、§8.2 第 10 条、§8.3（表格与 gapped 门槛建议）、修订记录；`nlchain_prechain_inner_plan.md` 开头与 §4.1 加结论。
+
+验证：
+
+- 本地 VM（gcc 11.4）：`lastz`、`lastz_D` 加 `-Werror` 0 警告；`collect_stats` 构建新改文件无警告；`base_tests` 19 项 SUCCESS；`nlchain_test` 518,512 项、`nlrechain_test` 2,929,359 项检查，均 0 失败。
+- 构造测试 20 项全部通过（含 `collect_stats` 计数 5 项）。
+- 回归对照 19fa9e5（去掉 `#` 行的 stdout、段表、stderr、退出码），18 项全部通过：
+  - 不经过改动的路径 5 组一致：非 nlchain 的默认 lav、`--inner=2000`、`--inner=2000 --chain`，以及 nlchain 不加 `--inner`（含次级链）。
+  - 新版显式给 b2 值 = 旧版默认，5 组：aglobin `--inner=2000`/次级链/`--inner=5000`（`--nlchaininner=2500,3750`），pseudocat 默认参数与远缘参数（`--hspthresh=2200 --gappedthresh=6000 --ydrop=3400`）。
+  - 新版默认 = 旧版显式给 a 值，7 组：同上 5 组，加远缘参数下 `--gappedthresh=2000`、显式 `--nlchainjump=2000 --nlchainsolo=2600`。
+  - 反例：aglobin `--inner=2000` 新默认段表 4 段，旧默认 15 段，确认改动生效。
+  - 回归脚本在会话 scratchpad 中，会话结束后丢失，清单如上。
+- 远端：19fa9e5 源码副本只替换 `lastz.c`、`lastz.h`（上传后核对 md5），编出 `bin/lastz_nli_d6a`（`-Werror`，0 警告，sha256 `7d811a08…9327c0f`，未写入 MANIFEST）。参数组 `nli_d6a_g3`（`--nlchain --inner=2000 --gappedthresh=2000`，不给 `--nlchaininner`）20 个作业的 MAF（去掉 `#` 行）和段表与 `nli_g3a` 逐字节一致，stderr 为空。
+
+### 12.7 未解决 / 风险
+
+- G3b 显示不加 `--inner`、只把 gapped 门槛降到 2000 也有 +0.004 的收益。这超出本方案范围，未处理。
+- 8e9f350/d9db595 的 `--nlchain --inner` 在真实数据上崩溃（12.2），19fa9e5 已不走这条路径，旧提交不修。
+- numPass1Dropped 在 simTest 上为 43–55（12.4、12.5），原因推断为第二次串链改走别的路径，没有逐个核实。
+- 服务器上的新脚本（`bootstrap_nli.sh`、`nli_stats.py`、`logs/nli_run*.sh`）、`tune_groups.tsv` 加的 12 行和 `bin/lastz_nli_d6a` 只在服务器上；`bin/lastz_nli*` 是 19fa9e5 的构建，不含本次默认值改动。
+- `README.lastz.html` 和 `lastz --help` 仍未写入任何 nlchain 选项。
+
+### 12.8 下一步（新会话）
+
+1. 补写 `README.lastz.html` 和 `lastz --help` 中的 nlchain 选项（含 `--nlchaininner` 和"`--inner` 时同时降 `--gappedthresh`"的建议）。
+2. 16 个最终测试物种对（§7 第 5 项）：由用户决定何时跑。服务器脚本需要先参数化；参数按 §8 加方案 A，`--inner=2000 --gappedthresh=2000`，二进制从本次提交构建。
+3. 可选：单独评估不加 `--inner` 时降低 gapped 门槛的收益（G3b）。
