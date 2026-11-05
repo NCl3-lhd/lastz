@@ -78,7 +78,7 @@ CFLAGS += -O3 ${definedForAll} ${VERSION_FLAGS}
 
 srcFiles = lastz infer_scores \
            seeds pos_table quantum seed_search diag_hash                  \
-           chain nlchain nlrechain gapped_extend tweener masking          \
+           chain nlchain nlrechain realign gapped_extend tweener masking  \
            segment edit_script                                            \
            identity_dist coverage_dist continuity_dist                    \
            output gfa lav axt maf cigar sam genpaf text_align align_diffs \
@@ -86,7 +86,7 @@ srcFiles = lastz infer_scores \
 
 incFiles = lastz.h infer_scores.h \
            seeds.h pos_table.h quantum.h seed_search.h diag_hash.h                            \
-           chain.h nlchain.h nlrechain.h gapped_extend.h tweener.h masking.h                  \
+           chain.h nlchain.h nlrechain.h realign.h gapped_extend.h tweener.h masking.h        \
            segment.h edit_script.h                                                            \
            identity_dist.h coverage_dist.h continuity_dist.h                                  \
            output.h gfa.h lav.h axt.h maf.h sam.h cigar.h genpaf.h text_align.h align_diffs.h \
@@ -131,6 +131,7 @@ clean_builds:
 	rm -f lastz_40
 	rm -f nlchain_test
 	rm -f nlrechain_test
+	rm -f realign_test
 
 # installation;  change installDir to suit your needs (in ../make-include.mak)
 
@@ -215,6 +216,13 @@ nlrechainTestObjs = utilities.o dna_utilities.o sequences.o segment.o edit_scrip
 nlrechain_test: nlrechain_test.c nlrechain.c ${nlrechainTestObjs} version.mak ${incFiles}
 	${CC} ${CPPFLAGS} ${CFLAGS} -Dscore_type=I nlrechain_test.c ${nlrechainTestObjs} -lm -o $@
 	./nlrechain_test
+
+# realign 单元测试（docs/realign_plan.md §4 第 1 步）；realign_test.c 直接包含
+# realign.c；score_alignment 来自 gapped_extend.o
+
+realign_test: realign_test.c realign.c ${nlrechainTestObjs} version.mak ${incFiles}
+	${CC} ${CPPFLAGS} ${CFLAGS} -Dscore_type=I realign_test.c ${nlrechainTestObjs} -lm -o $@
+	./realign_test
 
 lavCompare = ../tools/lav_compare.py
 gfaCompare = ../tools/gfa_compare.py

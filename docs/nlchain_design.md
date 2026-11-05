@@ -374,6 +374,11 @@ T_solo、T_sec **不与 gappedthresh 挂钩**：没给 `--gappedthresh` 时 last
 
 **`--inner` 时 gapped 门槛应同时降到 innerThreshold**（例如 `--inner=2000 --gappedthresh=2000`）。插值 HSP 多数是弱片段，gapped 门槛仍为 6000 时大部分被挡掉。simTest 上，在 `--inner=2000` 之外再加 `--gappedthresh=2000`，F_np/F_anc 再升约 0.009，precision 也升，gapped 延伸开销没有增加（`nlchain_progress.md` §12.5）。代码不自动降低门槛：显式给出的 `--gappedthresh` 优先，而 UCSC 式参数总会显式给出它。
 
+**远缘推荐配置还要加 `--gap=500,30 --realign=400,8`**（2026-11-05）：
+- `--gap=500,30` 用于 lastz 自身的 gapped 延伸，simTest 上比 400/30 高 F_np +0.004（`docs/scoring_param_eval.md` §5b）。
+- `--realign=400,8` 在输出前做框内全局重比对，只重新摆放 gap、不改首尾坐标。simTest 上再加 F_np +0.015、F_anc +0.012，10 个物种对全部提高；代价是总 CPU 约 +11%（`docs/realign_ksw2_eval.md` §8）。
+- `--realign` 是通用选项，不依赖 `--nlchain`，但收益只在上面这套 HoxD55 远缘参数下测过，O、E 的最优值依赖打分矩阵，所以没有默认值，必须显式给出。
+
 ### 8.4 代码要求：转移方程必须一眼能对上公式
 
 目标：读 `nlchain.c` 的人拿着 §4–§5 就能逐行核对每个转移，不需要先弄懂剪枝和数据结构。DuetMap 的 `relax()` 把三类转移、两种来源、剪枝和平局都塞进一个双重循环，是这里要避免的写法。
@@ -467,3 +472,8 @@ T_solo、T_sec **不与 gappedthresh 挂钩**：没给 `--gappedthresh` 时 last
 
 1. J2、T_solo2 默认沿用第一次的 J、T_solo（原暂定 min(J, innerThreshold/2)、min(T_solo, 1.25·innerThreshold)）：三档 F 相差 ≤ 0.0004，取参数最少的一档。`--nlchaininner` 保留。
 2. `--inner` 下推荐同时把 `--gappedthresh` 降到 innerThreshold（§8.3），代码不自动调整。
+
+**2026-11-05，打分与框内重比对。** 见 `docs/scoring_param_eval.md`、`docs/realign_plan.md`、`docs/realign_ksw2_eval.md`：
+
+1. 新增通用选项 `--realign=<O>,<E>[,right|left]`（`src/realign.c`）：输出前对每条比对沿原路径切段、做带约束的单仿射全局比对，只改 edit script。
+2. §8.3 的远缘推荐配置加上 `--gap=500,30 --realign=400,8`。

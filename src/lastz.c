@@ -296,6 +296,7 @@ s64 debugClockTotal = 0,
     debugClockChaining = 0,
     debugClockNlChaining = 0,
     debugClockNlRechain = 0,
+    debugClockRealign = 0,
     debugClockGappedExtend = 0,
     debugClockInterpolation = 0,
     debugClockOutput = 0;
@@ -399,6 +400,7 @@ static const control defaultParams =
 	  NULL },							//      reportFile
 	-1,-1,								// nlInnerJump, nlInnerSolo
 	NULL,								// nlrReportFilename
+	{ false, 0, 0, true },				// realign: enabled, gapOpen, gapExtend, rightAlign
 	true,								// gappedExtend
 
 	NULL,NULL,							// scoring, maskedScoring
@@ -739,6 +741,7 @@ int main
 	chain_zero_stats         ();
 	nlchain_zero_stats       ();
 	nlrechain_zero_stats     ();
+	realign_zero_stats       ();
 	gapped_extend_zero_stats ();
 	tweener_zero_stats       ();
 	masking_zero_stats       ();
@@ -1872,6 +1875,8 @@ next_target:
 			nlchain_generic_stats   (currParams->outputFile, print_generic);
 			nlrechain_generic_stats (currParams->outputFile, print_generic);
 			}
+		if (currParams->realign.enabled)
+			realign_generic_stats   (currParams->outputFile, print_generic);
 		gapped_extend_generic_stats (currParams->outputFile, print_generic);
 		if (currParams->innerSeed != NULL)
 			tweener_generic_stats   (currParams->outputFile, print_generic);
@@ -1910,6 +1915,7 @@ show_stats_and_clean_up:
 	chain_show_stats         (statsF);
 	nlchain_show_stats       (statsF);
 	nlrechain_show_stats     (statsF);
+	realign_show_stats       (statsF);
 	gapped_extend_show_stats (statsF);
 	if (currParams->innerSeed != NULL)
 		tweener_show_stats (statsF);
@@ -2084,6 +2090,8 @@ show_stats_and_clean_up:
 		}
 	dbg_timing_report (debugClockGappedExtend,  "gapped extension");
 	dbg_timing_report (debugClockInterpolation, "interpolation");
+	if (currParams->realign.enabled)
+		{ dbg_timing_report (debugClockRealign, "realign"); }
 	dbg_timing_report (debugClockOutput,        "output");
 	dbg_timing_report (debugClockQueryTotal,    "total query time");
 
@@ -3566,6 +3574,16 @@ void finish_one_strand
 		dbg_timing_add (debugClockInterpolation);
 		}
 
+	// 输出前的框内全局重比对（docs/realign_plan.md）
+
+	if ((alignList != NULL) && (currParams->realign.enabled))
+		{
+		dbg_timing_sub (debugClockRealign);
+		alignList = realign_aligns (target, query, currParams->scoring,
+		                            alignList, &currParams->realign);
+		dbg_timing_add (debugClockRealign);
+		}
+
 	// print the gapped alignments
 
 	if (alignList != NULL)
@@ -4949,6 +4967,11 @@ static void all_options (void)
 	fprintf (helpout, "  --match=<R>,<P>        scores are +R/-P for match/mismatch\n");
 	fprintf (helpout, "  --gap=<open,extend>    set gap open and extend penalties (default is " scoreFmtSimple "," scoreFmtSimple ")\n",
 	                 HOXD70_open, HOXD70_extend);
+	fprintf (helpout, "  --realign=<open,extend>[,right|left]\n");
+	fprintf (helpout, "                         before output, re-place the gaps inside each gapped\n");
+	fprintf (helpout, "                         alignment by banded global realignment with these gap\n");
+	fprintf (helpout, "                         penalties (endpoints unchanged);  ties put indels to\n");
+	fprintf (helpout, "                         the right (default) or left\n");
 	fprintf (helpout, "  --xdrop=<score>        set x-drop threshold (default is 10*sub[A][A])\n");
 	fprintf (helpout, "  --ydrop=<score>        set y-drop threshold (default is open+300extend)\n");
 	fprintf (helpout, "  --noxtrim              if x-drop extension encounters end of sequence, don't\n");
@@ -6389,6 +6412,32 @@ static void parse_options_loop
 			if ((lzParams->nl.secondaryScore < 0) || (lzParams->nl.secondaryRatio < 0))
 				chastise ("--nlchainsecondary values can't be negative\n");
 			haveNlchainOption = true;
+			goto next_arg;
+			}
+
+		// --realign=<open>,<extend>[,right|left]（docs/realign_plan.md）
+
+		if (strcmp_prefix (arg, "--realign=") == 0)
+			{
+			char* extendStr, *tieStr;
+			if (lzParams->realign.enabled) goto duplicated_option;
+			extendStr = strchr (argStr, ',');
+			if (extendStr == NULL)
+				chastise ("--realign requires <open>,<extend>[,right|left]\n");
+			*(extendStr++) = 0;
+			tieStr = strchr (extendStr, ',');
+			if (tieStr != NULL) *(tieStr++) = 0;
+			lzParams->realign.gapOpen   = string_to_score (argStr);
+			lzParams->realign.gapExtend = string_to_score (extendStr);
+			if ((lzParams->realign.gapOpen < 0) || (lzParams->realign.gapExtend < 0))
+				chastise ("--realign gap penalties can't be negative\n");
+			if ((tieStr == NULL) || (strcmp (tieStr, "right") == 0))
+				lzParams->realign.rightAlign = true;
+			else if (strcmp (tieStr, "left") == 0)
+				lzParams->realign.rightAlign = false;
+			else
+				chastise ("--realign tie direction must be right or left (not \"%s\")\n", tieStr);
+			lzParams->realign.enabled = true;
 			goto next_arg;
 			}
 
@@ -9555,6 +9604,9 @@ static void parse_options
 		if ((haveNlchainInner) && (lzParams->innerThreshold <= 0))
 			chastise ("--nlchaininner requires --inner\n");
 		}
+
+	if ((lzParams->realign.enabled) && (!lzParams->gappedExtend))
+		chastise ("--realign requires gapped extension (it can't be used with --nogapped or --format=segments)\n");
 
 	if (!lzParams->gappedExtend)
 		{

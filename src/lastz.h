@@ -19,6 +19,7 @@
 #include "diag_hash.h"			// diagonals hashing stuff
 #include "nlchain.h"			// non-linear chaining stuff
 #include "nlrechain.h"			// nlchain 的 gapped 后重新串链
+#include "realign.h"			// 输出前的框内全局重比对
 
 // establish ownership of global variables
 
@@ -209,6 +210,8 @@ typedef struct control
 	score		nlInnerJump;	// (I) --nlchaininner 的 J2；-1 => 同第一次的 J
 	score		nlInnerSolo;	// (I) --nlchaininner 的 T_solo2；-1 => 同第一次的 T_solo
 	char*		nlrReportFilename;//   剥链结果文件名（可为 NULL）
+	realignparams realign;		// (I) 输出前的框内全局重比对（docs/realign_plan.md）；
+								//     .. enabled = false 表示关闭
 	int			gappedExtend;	// (I) true => perform gapped extension
 
 	scoreset*	scoring;		// (I) scoring set
