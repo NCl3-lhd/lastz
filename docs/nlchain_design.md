@@ -382,15 +382,22 @@ T_solo、T_sec **不与 gappedthresh 挂钩**：没给 `--gappedthresh` 时 last
 远缘完整推荐配置（HoxD55，UCSC 远缘参数之外再加）：
 
 ```
---nlchain --inner=1000 --gappedthresh=1000 --gap=500,30 --realign=400,8
+--nlchain --inner=1000 --gappedthresh=1000 --gap=500,30 --realign=400,8 --mea=2,0.5
 ```
 
-simTest 10 对平均：F_np 0.7665、F_anc 0.7558。同一数据上，原版 lastz 的最好配置（`--inner=2000 --gappedthresh=2000` 后接 axtChain/chainNet medium/3000）为 F_np 0.7294、F_anc 0.7312。以上数值都在调参集 simTest 上得出，16 个最终测试物种对还没有跑。
+simTest 10 对平均：F_np 0.7804、F_anc 0.7680（不加 `--mea` 时为 0.7665、0.7558）。同一数据上，原版 lastz 的最好配置（`--inner=2000 --gappedthresh=2000` 后接 axtChain/chainNet medium/3000）为 F_np 0.7294、F_anc 0.7312。以上数值都在调参集 simTest 上得出，16 个最终测试物种对还没有跑。
 
 **远缘推荐配置还要加 `--gap=500,30 --realign=400,8`**（2026-11-05）：
 - `--gap=500,30` 用于 lastz 自身的 gapped 延伸，simTest 上比 400/30 高 F_np +0.004（`docs/scoring_param_eval.md` §5b）。
 - `--realign=400,8` 在输出前做框内全局重比对，只重新摆放 gap、不改首尾坐标。simTest 上再加 F_np +0.015、F_anc +0.012，10 个物种对全部提高；代价是总 CPU 约 +11%（`docs/realign_ksw2_eval.md` §8）。
 - `--realign` 是通用选项，不依赖 `--nlchain`，但收益只在上面这套 HoxD55 远缘参数下测过，O、E 的最优值依赖打分矩阵，所以没有默认值，必须显式给出。
+
+**远缘推荐配置再加 `--mea=2,0.5`**（2026-11-07）：
+- `--mea` 是 `--realign` 的后验解码模式，必须与 `--realign` 一起给。它在 realign 的每一段里做前向-后向求每个碱基对的后验，再取使 Σ(后验 − θ) 最大的路径，后验低于 θ 的碱基对改为不比对。λ 取打分矩阵 λ_KA 的 2 倍。
+- simTest 上相对上一版推荐：F_np 0.7665 → 0.7804（+0.014），F_anc 0.7558 → 0.7680（+0.012），10 个物种对全部提高，远缘对提高最多（Cow-Rat F_np +0.019）。precision +0.032，recall −0.005。总运行时间约 +13%（`docs/mea_eval.md` §3）。
+- 收益约三分之一来自把错位的碱基对改对，三分之二来自把拿不准的碱基对改成不比对（去掉的碱基对约 90% 原本是错的，`docs/mea_eval.md` §3.3）。更看重覆盖度时改用 `--mea=2,0`（F_np +0.006，recall 和 precision 同时提高）。
+- λ×1 会使后验整体偏低，θ=0.5 时丢掉大量正确碱基对（F_np −0.063），不要用。最优点在 (λ, θ) 的一条平坦脊线上，`--mea=1.5,0.5` 的 F_np 略高（0.7826），但 F_anc 较低、对 θ 更敏感。
+- 同 `--realign`，只在 HoxD55 远缘参数、simTest 调参集上测过，没有默认值。
 
 ### 8.4 代码要求：转移方程必须一眼能对上公式
 
@@ -495,3 +502,8 @@ simTest 10 对平均：F_np 0.7665、F_anc 0.7558。同一数据上，原版 las
 
 1. §8.3 的 nlchain 远缘推荐由 `--inner=2000 --gappedthresh=2000` 改为 `--inner=1000 --gappedthresh=1000`。只改文档推荐，代码默认值不变。
 2. 原版（不加 `--nlchain`）的 `--inner` 门槛不能低于 2000，在 §8.3 中注明。
+
+**2026-11-07，后验解码。** 见 `docs/mea_plan.md`、`docs/mea_eval.md`：
+
+1. 新增选项 `--mea=<λ倍数>,<θ>`（`src/realign.c`），作为 `--realign` 的后验解码模式。
+2. §8.3 的远缘推荐配置加上 `--mea=2,0.5`。
