@@ -26,12 +26,14 @@
 #include <stdio.h>				// standard C i/o stuff
 #include <string.h>				// standard C string stuff
 #include <math.h>				// exp, log（MEA）
+#include <pthread.h>			// 多线程重比对
 #include "build_options.h"		// build options
 #include "utilities.h"			// utility stuff
 #include "dna_utilities.h"		// dna/scoring stuff
 #include "sequences.h"			// sequence stuff
 #include "edit_script.h"		// alignment edit script stuff
 #include "gapped_extend.h"		// score_alignment
+#include "kthread.h"			// kt_for（klib）
 
 #define  realign_owner			// (make this the owner of its globals)
 #include "realign.h"			// interface to this module
@@ -66,21 +68,22 @@
 
 //----------
 //
-// 模块内的工作区（反复使用，按需扩大）
+// 模块内的工作区（反复使用，按需扩大）；多线程（--threads）下每个线程一份，
+// 工作线程结束前由 realign_free_work 释放
 //
 //----------
 
-static u8*		colOp    = NULL;	// 一条比对展开后的每列操作
-static u64		colOpCap = 0;
-static u8*		newOp    = NULL;	// 一段重比对结果（逆序）
-static u64		newOpCap = 0;
-static u8*		tb       = NULL;	// 回溯表，(lt+1) 行 × (2w+1) 列
-static u64		tbCap    = 0;
-static score*	hPrev    = NULL;	// 按 query 下标的整行数组
-static score*	hCur     = NULL;
-static score*	fPrev    = NULL;
-static score*	fCur     = NULL;
-static u64		rowCap   = 0;
+static __thread u8*		colOp    = NULL;	// 一条比对展开后的每列操作
+static __thread u64		colOpCap = 0;
+static __thread u8*		newOp    = NULL;	// 一段重比对结果（逆序）
+static __thread u64		newOpCap = 0;
+static __thread u8*		tb       = NULL;	// 回溯表，(lt+1) 行 × (2w+1) 列
+static __thread u64		tbCap    = 0;
+static __thread score*	hPrev    = NULL;	// 按 query 下标的整行数组
+static __thread score*	hCur     = NULL;
+static __thread score*	fPrev    = NULL;
+static __thread score*	fCur     = NULL;
+static __thread u64		rowCap   = 0;
 
 static void grow_u8
    (u8**		buf,
@@ -308,14 +311,16 @@ static u64 banded_global
 #define meaMaxCells (((u64) 1) << 26)	// 一段的 double 矩阵超过此格数时保留 Viterbi 路径
 #define meaNegInf   (-1.0e300)
 
-static double*	post      = NULL;	// 前向 M 值，随后原地改为匹配后验；(lt+1)×(2w+1)
-static u64		postCap   = 0;
-static double*	rowScale  = NULL;	// 前向每行的对数缩放（累计）
-static u64		rowScaleCap = 0;
-static double*	meaRow[6] = { NULL, NULL, NULL, NULL, NULL, NULL };
-static u64		meaRowCap = 0;
-static u8*		vitOp     = NULL;	// Viterbi 路径（逆序）的副本
-static u64		vitOpCap  = 0;
+static __thread double*	post      = NULL;	// 前向 M 值，随后原地改为匹配后验；(lt+1)×(2w+1)
+static __thread u64		postCap   = 0;
+static __thread double*	rowScale  = NULL;	// 前向每行的对数缩放（累计）
+static __thread u64		rowScaleCap = 0;
+static __thread double*	meaRow[6] = { NULL, NULL, NULL, NULL, NULL, NULL };
+static __thread u64		meaRowCap = 0;
+static __thread u8*		vitOp     = NULL;	// Viterbi 路径（逆序）的副本
+static __thread u64		vitOpCap  = 0;
+
+// 以下由 mea_prepare 在主线程设好，工作线程只读
 
 static double*	expSub    = NULL;	// exp(λ(sub[a][b] − smax))，256×256
 static double	meaGo, meaGe;		// 开 gap 列、延伸 gap 列的权重（含 smax/2 的平移）
@@ -917,6 +922,104 @@ alignel* realign_aligns
 		realign_count_stat (numAligns);
 		realign_one (target, query, scoring, a, params);
 		}
+	return alignList;
+	}
+
+//----------
+//
+// realign_aligns_threaded--
+//	同 realign_aligns，用 numThreads 个线程。每条比对的重比对互相独立（切点只
+//	取决于这条比对自己的 edit script），只读 target/query 与打分，所以结果与
+//	单线程逐字节相同。工作区是线程局部的；mea_prepare 的缓存在开线程前设好。
+//
+//----------
+
+typedef struct realignctx
+	{
+	seq*					target;
+	seq*					query;
+	scoreset*				scoring;
+	const realignparams*	params;
+	alignel**				aligns;
+	long					numAligns;
+	long					next;			// 下一条待处理的比对（原子递增）
+	} realignctx;
+
+// realign_free_work-- 释放本线程的工作区
+
+static void realign_free_work
+   (void)
+	{
+	int k;
+	free_if_valid ("realign colOp",    colOp);     colOp    = NULL;  colOpCap    = 0;
+	free_if_valid ("realign newOp",    newOp);     newOp    = NULL;  newOpCap    = 0;
+	free_if_valid ("realign tb",       tb);        tb       = NULL;  tbCap       = 0;
+	free_if_valid ("realign hPrev",    hPrev);     hPrev    = NULL;
+	free_if_valid ("realign hCur",     hCur);      hCur     = NULL;
+	free_if_valid ("realign fPrev",    fPrev);     fPrev    = NULL;
+	free_if_valid ("realign fCur",     fCur);      fCur     = NULL;  rowCap      = 0;
+	free_if_valid ("realign post",     post);      post     = NULL;  postCap     = 0;
+	free_if_valid ("realign rowScale", rowScale);  rowScale = NULL;  rowScaleCap = 0;
+	for (k=0 ; k<6 ; k++)
+		{ free_if_valid ("realign meaRow", meaRow[k]);  meaRow[k] = NULL; }
+	meaRowCap = 0;
+	free_if_valid ("realign vitOp",    vitOp);     vitOp    = NULL;  vitOpCap    = 0;
+	}
+
+// realign_lane-- kt_for 的回调；n = numThreads，每个线程恰好跑一条 lane，
+// lane 内按原子计数取比对（长短不一，动态分配），结束时释放本线程工作区
+
+static void realign_lane
+   (void*	data,
+	arg_dont_complain(long lane),
+	arg_dont_complain(int tid))
+	{
+	realignctx*	ctx = (realignctx*) data;
+	long		i;
+
+	for (;;)
+		{
+		i = __sync_fetch_and_add (&ctx->next, 1);
+		if (i >= ctx->numAligns) break;
+		realign_count_stat (numAligns);
+		realign_one (ctx->target, ctx->query, ctx->scoring, ctx->aligns[i], ctx->params);
+		}
+	realign_free_work ();
+	}
+
+alignel* realign_aligns_threaded
+   (int						numThreads,
+	seq*					target,
+	seq*					query,
+	scoreset*				scoring,
+	alignel*				alignList,
+	const realignparams*	params)
+	{
+	realignctx	ctx;
+	alignel*	a;
+	long		n;
+
+	n = 0;
+	for (a=alignList ; a!=NULL ; a=a->next) n++;
+	if ((numThreads <= 1) || (n < 2))
+		return realign_aligns (target, query, scoring, alignList, params);
+
+	if (params->mea) mea_prepare (scoring, params);
+
+	ctx.target    = target;
+	ctx.query     = query;
+	ctx.scoring   = scoring;
+	ctx.params    = params;
+	ctx.numAligns = n;
+	ctx.next      = 0;
+	ctx.aligns    = (alignel**) malloc_or_die ("realign_aligns_threaded", n * sizeof(alignel*));
+	n = 0;
+	for (a=alignList ; a!=NULL ; a=a->next) ctx.aligns[n++] = a;
+
+	if (numThreads > ctx.numAligns) numThreads = (int) ctx.numAligns;
+	kt_for (numThreads, realign_lane, &ctx, numThreads);
+
+	free_if_valid ("realign_aligns_threaded", ctx.aligns);
 	return alignList;
 	}
 

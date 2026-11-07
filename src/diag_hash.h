@@ -65,10 +65,13 @@
 
 //--- initialized variables for this module ---
 
+// 多线程（--threads）：这些指针是线程局部的，每个线程有自己的一套哈希；
+// 种子搜索的工作线程由 seed_search.c 给它们指定内存，见 seed_hit_search_threaded
+
 #ifdef diag_hash_owner
-unspos*  diagEnd    = NULL;		// arrays (indexed by 0..diagHashSize-1) to
-unspos*  diagStart  = NULL;		// .. track the extent of discovered hits on a
-sgnpos*  diagActual = NULL;		// .. given diagonal (modulo diagHashSize);
+__thread unspos*  diagEnd    = NULL;		// arrays (indexed by 0..diagHashSize-1) to
+__thread unspos*  diagStart  = NULL;		// .. track the extent of discovered hits on a
+__thread sgnpos*  diagActual = NULL;		// .. given diagonal (modulo diagHashSize);
 								// .. no values in any of these arrays are valid
 								// .. if the corresponding value in diagEnd is
 								// .. hashInactiveEnd;  diagEnd (in addition to
@@ -81,18 +84,18 @@ sgnpos*  diagActual = NULL;		// .. given diagonal (modulo diagHashSize);
 								// .. represented (this is used only to
 								// .. detect/resolve collisions)
 
-u32*     diagActive = NULL;		// array (indexed by 0..numdiagActive-1) of
-int      numDiagActive;			// .. positions in diagEnd and diagStart that
+__thread u32*     diagActive = NULL;		// array (indexed by 0..numdiagActive-1) of
+__thread int      numDiagActive;			// .. positions in diagEnd and diagStart that
 								// ..  have a non-zero value
 
 //--- external access to the variables, for other modules ---
 
 #else
-extern unspos* diagEnd;
-extern unspos* diagStart;
-extern sgnpos* diagActual;
-extern u32*    diagActive;
-extern int     numDiagActive;
+extern __thread unspos* diagEnd;
+extern __thread unspos* diagStart;
+extern __thread sgnpos* diagActual;
+extern __thread u32*    diagActive;
+extern __thread int     numDiagActive;
 #endif
 
 // macros for accessing the hash

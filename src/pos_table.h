@@ -230,6 +230,11 @@ void pos_table_show_stats_after (FILE* f);
 postable* build_seed_position_table (seq* seq, unspos start, unspos end,
                                      const s8 upperCharToBits[],
                                      seed* seed, u32 step);
+postable* build_seed_position_table_threaded
+                                    (int numThreads,
+                                     seq* seq, unspos start, unspos end,
+                                     const s8 upperCharToBits[],
+                                     seed* seed, u32 step);
 postable* build_quantum_seed_position_table
                                     (seq* seq, unspos start, unspos end,
                                      u8* bottleneck, const charvec qToBest[],

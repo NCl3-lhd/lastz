@@ -274,6 +274,18 @@ u64    seed_hit_search        (seq* seq1, postable* pt,
                                u32 bandWidth,
 #endif // not forbidBandWidth
                                hitprocessor processor, void* processorInfo);
+#ifndef densityFiltering
+u64    seed_hit_search_threaded (int numThreads,
+                               seq* seq1, postable* pt,
+                               seq* seq2, unspos start, unspos end,
+                               int selfCompare,
+                               const s8 charToBits[], seed* hitSeed,
+                               u32 searchLimit, u32 reportSearchLimit,
+#ifndef forbidBandWidth
+                               u32 bandWidth,
+#endif // not forbidBandWidth
+                               hitprocessor processor, void* processorInfo);
+#endif // not densityFiltering
 void   free_seed_hit_search   (void);
 u64    process_for_plain_hit  (void* info,
                                unspos pos1, unspos pos2, unspos length);

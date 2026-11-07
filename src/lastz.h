@@ -212,6 +212,8 @@ typedef struct control
 	char*		nlrReportFilename;//   剥链结果文件名（可为 NULL）
 	realignparams realign;		// (I) 输出前的框内全局重比对（docs/realign_plan.md）；
 								//     .. enabled = false 表示关闭
+	int			numThreads;		// (I) --threads：工作线程数（docs/parallel_plan.md）；
+								//     .. 1 = 单线程，结果与线程数无关
 	int			gappedExtend;	// (I) true => perform gapped extension
 
 	scoreset*	scoring;		// (I) scoring set

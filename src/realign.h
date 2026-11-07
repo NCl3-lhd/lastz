@@ -91,6 +91,9 @@ void realign_generic_stats (FILE* f, void (*func) (FILE*, const char*, ...));
 // 分数；比对的首尾坐标、次序不变。
 alignel* realign_aligns (seq* target, seq* query, scoreset* scoring,
                          alignel* alignList, const realignparams* params);
+alignel* realign_aligns_threaded (int numThreads, seq* target, seq* query,
+                         scoreset* scoring, alignel* alignList,
+                         const realignparams* params);
 
 #undef global
 #endif // realign_H

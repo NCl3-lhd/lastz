@@ -21,6 +21,7 @@
 #include <string.h>				// standard C string stuff
 #include <ctype.h>				// standard C upper/lower stuff
 #include <math.h>				// standard C math stuff
+#include <pthread.h>			// 多线程种子搜索
 #include "build_options.h"		// build options
 #include "utilities.h"			// utility stuff
 #include "dna_utilities.h"		// dna/scoring stuff
@@ -29,6 +30,7 @@
 #include "pos_table.h"			// position table stuff
 #include "diag_hash.h"			// diagonals hashing stuff
 #include "segment.h"			// segment table management stuff
+#include "kthread.h"			// kt_for（klib）
 
 #define  seed_search_owner		// (make this the owner of its globals)
 #include "seed_search.h"		// interface to this module
@@ -136,32 +138,113 @@ struct
 //----------
 
 // private globals shared by all the routines under the umbrella of
-// seed_hit_search()
+// seed_hit_search()；多线程（--threads）下每个线程一份
 
-static seq*			seq1;
-static postable*	pt;
-static seq*			seq2;
-static unspos		start;
-static unspos		end;
-static int			selfCompare;
-static int			sameStrand;  // (only meaningful if selfCompare is true)
-static const s8*	upperCharToBits;
-static seed*		hitSeed;
-static u32			searchLimit;
-static u32			reportSearchLimit;
-static s32			searchToGo;
+static __thread seq*			seq1;
+static __thread postable*	pt;
+static __thread seq*			seq2;
+static __thread unspos		start;
+static __thread unspos		end;
+static __thread int			selfCompare;
+static __thread int			sameStrand;  // (only meaningful if selfCompare is true)
+static __thread const s8*	upperCharToBits;
+static __thread seed*		hitSeed;
+static __thread u32			searchLimit;
+static __thread u32			reportSearchLimit;
+static __thread s32			searchToGo;
 #ifdef densityFiltering
-static u64			maxBasesAllowed;
+static __thread u64			maxBasesAllowed;
 #endif // densityFiltering
 #ifndef forbidBandWidth
-static u32			bandWidth;
+static __thread u32			bandWidth;
 #endif // not forbidBandWidth
-static hitprocessor	processor;
-static void*		processorInfo;
+static __thread hitprocessor	processor;
+static __thread void*		processorInfo;
 
-static int          unblockedLeftExtension;	// true => seed extension routines
+static __thread int          unblockedLeftExtension;	// true => seed extension routines
 								// .. (e.g. xdrop_extend_seed_hit) shouldn't
 								// .. block left-extension at previous diagEnd
+
+//----------
+//
+// 多线程种子搜索（--threads，见 seed_hit_search_threaded）的记录
+//
+// 一条链的 query 被切成若干块，每块由一个工作线程从空的对角线哈希开始独立
+// 搜索。块首之前的真实哈希状态 Tin 要等前面的块确定后才知道；主线程用 Tin
+// 串行重放块首一小段（到快照点 P），再用工作线程在 P 之后记下的摘要判断：
+// 如果从 P 起本地状态与真实状态 T_P 下的每个决定（跳过/延伸、左延伸停在哪）
+// 都相同，就直接采用工作线程在 P 之后的 HSP；否则继续重放到下一个快照点，
+// 最后一级失败就重放到块尾。所以结果总与单线程逐字节相同。
+//
+// 以下记 diagEnd 时未激活按 0 算（激活时置 0，与未激活行为相同）。P 之后：
+//	本地 diagEnd[h] = max(lp[h], e[h])，lp 为 P 处的本地值，e 为 P 之后的 extent 最大值；
+//	在之前所有决定都相同的前提下，真实值 = max(T_P[h], e[h])。
+// 对类 h 的一次命中（k = pos2-length，即种子起点）：
+//	本地跳过、且 e[h] <= k（只因 lp 跳过）：真实也跳过 <=> T_P[h] > k
+//		=> 记 needSkip[h] = max(k+1)，要求 T_P[h] >= needSkip[h]
+//	本地延伸：真实也延伸 <=> T_P[h] <= k；真实停止点比本地靠右（T_P > 本地值）时，
+//		左延伸结果相同 <=> 左延伸到达的 query 坐标 reach >= T_P[h]
+//		=> 记 minM[h] = min(min(k, reach))，要求 T_P[h] <= minM[h]
+//	本地延伸、左延伸被停止点挡住（x-drop 条件仍成立）且停止点来自 lp（lp > e）：
+//		真实停止点更靠左时结果不同 => 记 blocked[h]，要求 T_P[h] >= lp[h]
+// 通过时块尾的真实状态为 max(T_P[h], e[h])。
+//
+//----------
+
+#define parMaxLevels 2					// 快照点级数
+
+typedef struct parhit					// 交给 reporter 的一次报告
+	{
+	unspos		pos1, pos2, length;
+	score		s;
+	} parhit;
+
+typedef struct parhitlist
+	{
+	u32			len, size;
+	parhit*		h;
+	} parhitlist;
+
+typedef struct parsummary				// 一个快照点之后的摘要（各数组长 diagHashSize）
+	{
+	unspos		p;						// 快照点（query 位置，pos2 >= p 的命中计入）
+	u32			prefixCount;			// 快照点之前本地产生的报告数
+	unspos*		lp;
+	unspos*		e;
+	s64*		minM;
+	unspos*		needSkip;
+	u8*			blocked;
+	} parsummary;
+
+typedef struct parchunk
+	{
+	unspos		qa, qb;					// 块的 query 区间 [qa,qb)
+	int			numLevels;
+	int			numActive;				// 工作线程已越过的快照点数
+	parsummary	lev[parMaxLevels];
+	parhitlist	hits;					// 本地报告
+	volatile int done;
+	} parchunk;
+
+static __thread parchunk*   parRec = NULL;	// 工作线程当前的块；其余情况为 NULL
+static __thread parhitlist* parOut = NULL;	// par_collect_hit 写到这里
+static __thread sgnpos      parLeftReach;	// xdrop_extend_seed_hit 交给记录的量
+static __thread int         parLeftBlocked;
+
+//----------
+// 查表批处理（常数优化）：同一 query 位置的全部命中（精确 + 各转换）先按原顺序
+// 收进 hitBuf，对它们在 target 中的位置发预取，再按原顺序逐个交给 processor。
+// 调用序列不变，结果不变；只改变访存的重叠程度。
+//----------
+
+static __thread int     batchHits = false;
+static __thread unspos* hitBuf    = NULL;
+static __thread u32     hitBufCap = 0;
+
+static u64 find_table_matches_batched (u32 packed, unspos pos2);
+
+static void par_note_skip   (u32 hDiag, unspos k);
+static void par_note_extend (u32 hDiag, unspos k, sgnpos reach, int blocked, unspos extent);
 
 // static data area for discovery_probability
 
@@ -175,6 +258,7 @@ static u8* foldedHits = NULL;
 //----------
 
 static u64   private_hit_search            (void);
+static u64   private_hit_search_range      (u8* qFirst, u8* qStop);
 static u64   private_hit_search_halfweight (void);
 static u64   private_hit_search_resolve    (void);
 
@@ -450,6 +534,483 @@ u64 seed_hit_search
 
 void free_seed_hit_search (void) { free_diag_hash (); }
 
+//----------
+//
+// seed_hit_search_threaded--
+//	与 seed_hit_search 相同，但用 numThreads 个工作线程（另有调用线程做拼接）。
+//	对 processor 的 reporter 的调用序列（参数与顺序）与单线程逐字节相同，做法
+//	见本文件开头"多线程种子搜索"的说明。
+//
+//	只支持 process_for_simple_hit + x-drop 延伸 + 固定分数门槛、不做自比对、
+//	不限搜索次数、不是半权/分辨位种子；其他情况（或 numThreads <= 1）直接调用
+//	seed_hit_search。
+//
+//	调试用环境变量（不影响结果，只影响切块与快照点）：
+//	  LASTZ_PAR_CHUNK=<bp>       块长
+//	  LASTZ_PAR_SNAP=<bp>,<bp>   两级快照点离块首的距离
+//	  LASTZ_PAR_REPORT=1         在 stderr 报告每级采纳的块数
+//
+//----------
+
+#ifndef densityFiltering
+
+typedef struct parctx
+	{
+	seq*			seq1;
+	postable*		pt;
+	seq*			seq2;
+	unspos			start, end;
+	const s8*		upperCharToBits;
+	seed*			hitSeed;
+#ifndef forbidBandWidth
+	u32				bandWidth;
+#endif // not forbidBandWidth
+	hitprocsimple	workerInfo;			// reporter 换成 par_collect_hit
+	int				numThreads;
+	unspos**		wEnd;				// 每个工作线程一套对角线哈希
+	unspos**		wStart;
+	sgnpos**		wActual;
+	u32**			wActive;
+	long			numChunks;
+	parchunk*		chunks;
+	long			numStitched;		// 主线程已拼接的块数
+	long			window;				// 只允许第 numStitched+window 块之前的块开工，
+										// .. 限制同时存在的摘要（每块约 3 MB）
+	pthread_mutex_t	mutex;
+	pthread_cond_t	cond;
+	} parctx;
+
+#define parInfM ((s64) (((u64) -1) >> 1))
+
+static u32 par_collect_hit
+   (arg_dont_complain(void* info),
+	unspos	pos1,
+	unspos	pos2,
+	unspos	length,
+	score	s)
+	{
+	parhitlist* L = parOut;
+	if (L->len == L->size)
+		{
+		L->size = (L->size == 0)? 1024 : 2*L->size;
+		L->h = realloc_or_die ("par_collect_hit", L->h, L->size * sizeof(parhit));
+		}
+	L->h[L->len].pos1   = pos1;
+	L->h[L->len].pos2   = pos2;
+	L->h[L->len].length = length;
+	L->h[L->len].s      = s;
+	L->len++;
+	return length;
+	}
+
+static void par_note_skip (u32 hDiag, unspos k)
+	{
+	int l;
+	for (l=0 ; l<parRec->numActive ; l++)
+		{
+		parsummary* S = &parRec->lev[l];
+		if ((S->e[hDiag] <= k) && (S->needSkip[hDiag] < k+1))
+			S->needSkip[hDiag] = k+1;
+		}
+	}
+
+static void par_note_extend (u32 hDiag, unspos k, sgnpos reach, int blocked, unspos extent)
+	{
+	s64 m = ((s64) reach < (s64) k)? (s64) reach : (s64) k;
+	int l;
+	for (l=0 ; l<parRec->numActive ; l++)
+		{
+		parsummary* S = &parRec->lev[l];
+		if (m < S->minM[hDiag]) S->minM[hDiag] = m;
+		if ((blocked) && (S->lp[hDiag] > S->e[hDiag])) S->blocked[hDiag] = true;
+		if (extent > S->e[hDiag]) S->e[hDiag] = extent;
+		}
+	}
+
+// par_set_globals-- 把搜索参数放进本线程的线程局部变量
+
+static void par_set_globals (parctx* ctx, hitprocsimple* info)
+	{
+	seq1              = ctx->seq1;
+	pt                = ctx->pt;
+	seq2              = ctx->seq2;
+	start             = ctx->start;
+	end               = ctx->end;
+	selfCompare       = false;
+	sameStrand        = false;
+	upperCharToBits   = ctx->upperCharToBits;
+	hitSeed           = ctx->hitSeed;
+	searchLimit       = 0;
+	reportSearchLimit = 0;
+	searchToGo        = 0;
+#ifndef forbidBandWidth
+	bandWidth         = ctx->bandWidth;
+#endif // not forbidBandWidth
+	processor         = process_for_simple_hit;
+	processorInfo     = info;
+	}
+
+static unspos diag_end_value (u32 hDiag)
+	{ return (diagEnd[hDiag] == hashInactiveEnd)? 0 : diagEnd[hDiag]; }
+
+// par_worker-- kt_for 的回调：独立搜索第 i 块
+
+static void par_worker (void* data, long i, int tid)
+	{
+	parctx*		ctx = (parctx*) data;
+	parchunk*	c   = &ctx->chunks[i];
+	unspos		from;
+	u32			h;
+	int			l;
+
+	// 背压：不能超出主线程太远。不会死锁：主线程要拼接的下一块 numStitched
+	// 必已被某个线程取走（kt_for 按序分配，取走更大编号的线程此前的块都已完成），
+	// 而它满足 numStitched < numStitched+window，不会等待
+
+	pthread_mutex_lock (&ctx->mutex);
+	while (i >= ctx->numStitched + ctx->window)
+		pthread_cond_wait (&ctx->cond, &ctx->mutex);
+	pthread_mutex_unlock (&ctx->mutex);
+
+	par_set_globals (ctx, &ctx->workerInfo);
+
+	if (ctx->wEnd[tid] == NULL)
+		{
+		ctx->wEnd[tid]    = malloc_or_die ("par_worker (diagEnd)",    diagHashSize * sizeof(unspos));
+		ctx->wStart[tid]  = malloc_or_die ("par_worker (diagStart)",  diagHashSize * sizeof(unspos));
+		ctx->wActual[tid] = malloc_or_die ("par_worker (diagActual)", diagHashSize * sizeof(sgnpos));
+		ctx->wActive[tid] = malloc_or_die ("par_worker (diagActive)", diagHashSize * sizeof(u32));
+		for (h=0 ; h<diagHashSize ; h++) ctx->wEnd[tid][h] = hashInactiveEnd;
+		}
+	diagEnd       = ctx->wEnd[tid];
+	diagStart     = ctx->wStart[tid];
+	diagActual    = ctx->wActual[tid];
+	diagActive    = ctx->wActive[tid];
+	numDiagActive = 0;
+	for (h=0 ; h<diagHashSize ; h++) diagEnd[h] = hashInactiveEnd;
+
+	for (l=0 ; l<c->numLevels ; l++)
+		{
+		parsummary* S = &c->lev[l];
+		S->lp       = malloc_or_die ("par_worker (lp)",       diagHashSize * sizeof(unspos));
+		S->e        = zalloc_or_die ("par_worker (e)",        diagHashSize * sizeof(unspos));
+		S->minM     = malloc_or_die ("par_worker (minM)",     diagHashSize * sizeof(s64));
+		S->needSkip = zalloc_or_die ("par_worker (needSkip)", diagHashSize * sizeof(unspos));
+		S->blocked  = zalloc_or_die ("par_worker (blocked)",  diagHashSize * sizeof(u8));
+		for (h=0 ; h<diagHashSize ; h++) S->minM[h] = parInfM;
+		}
+
+	c->numActive = 0;
+	parRec = c;
+	parOut = &c->hits;
+
+	from = c->qa;
+	for (l=0 ; l<c->numLevels ; l++)
+		{
+		parsummary* S = &c->lev[l];
+		private_hit_search_range (seq2->v + from, seq2->v + S->p);
+		S->prefixCount = c->hits.len;
+		for (h=0 ; h<diagHashSize ; h++) S->lp[h] = diag_end_value (h);
+		c->numActive = l+1;
+		from = S->p;
+		}
+	private_hit_search_range (seq2->v + from, seq2->v + c->qb);
+
+	parRec = NULL;
+	parOut = NULL;
+	diagEnd = diagStart = NULL;  diagActual = NULL;  diagActive = NULL;
+	free_if_valid ("hitBuf", hitBuf);	// （工作线程随 kt_for 结束，不留线程局部内存）
+	hitBuf = NULL;  hitBufCap = 0;
+
+	pthread_mutex_lock (&ctx->mutex);
+	c->done = true;
+	pthread_cond_broadcast (&ctx->cond);
+	pthread_mutex_unlock (&ctx->mutex);
+	}
+
+static void* par_helper (void* data)
+	{
+	parctx* ctx = (parctx*) data;
+	kt_for (ctx->numThreads, par_worker, ctx, ctx->numChunks);
+	return NULL;
+	}
+
+// par_check-- 当前（主线程）哈希为快照点处的真实状态 T_P 时，P 之后的本地决定是否全部成立
+
+static int par_check (parsummary* S)
+	{
+	u32		h;
+	unspos	tp;
+
+	for (h=0 ; h<diagHashSize ; h++)
+		{
+		tp = diag_end_value (h);
+		if ((s64) tp > S->minM[h])                 return false;
+		if (tp < S->needSkip[h])                   return false;
+		if ((S->blocked[h]) && (tp < S->lp[h]))    return false;
+		}
+	return true;
+	}
+
+static void par_free_chunk (parchunk* c)
+	{
+	int l;
+	for (l=0 ; l<c->numLevels ; l++)
+		{
+		parsummary* S = &c->lev[l];
+		free_if_valid ("par (lp)",       S->lp);
+		free_if_valid ("par (e)",        S->e);
+		free_if_valid ("par (minM)",     S->minM);
+		free_if_valid ("par (needSkip)", S->needSkip);
+		free_if_valid ("par (blocked)",  S->blocked);
+		S->lp = S->e = S->needSkip = NULL;  S->minM = NULL;  S->blocked = NULL;
+		}
+	free_if_valid ("par (hits)", c->hits.h);
+	c->hits.h = NULL;
+	}
+
+// par_parse_env-- 读调试用环境变量（见 seed_hit_search_threaded 的说明）
+
+static unspos par_env_unspos (const char* s)
+	{
+	char*	end;
+	unsigned long long v = strtoull (s, &end, 10);
+	if ((end == s) || ((*end != 0) && (*end != ',')))
+		suicidef ("bad number in LASTZ_PAR_* environment variable: \"%s\"", s);
+	return (unspos) v;
+	}
+
+u64 seed_hit_search_threaded
+   (int				numThreads,
+	seq*			_seq1,
+	postable*		_pt,
+	seq*			_seq2,
+	unspos			_start,
+	unspos			_end,
+	int				_selfCompare,
+	const s8		_upperCharToBits[],
+	seed*			_hitSeed,
+	u32				_searchLimit,
+	u32				_reportSearchLimit,
+#ifndef forbidBandWidth
+	u32				_bandWidth,
+#endif // not forbidBandWidth
+	hitprocessor	_processor,
+	void*			_processorInfo)
+	{
+	hitprocsimple*	origInfo = (hitprocsimple*) _processorInfo;
+	hitprocsimple	mainInfo;
+	parctx			ctx;
+	parhitlist		replay = { 0, 0, NULL };
+	unspos*			tin;
+	unspos			len, chunkLen, snap[parMaxLevels], from, tp;
+	long			k, accepted[parMaxLevels+1];
+	pthread_t		helper;
+	parchunk*		c;
+	parsummary*		S;
+	parhit*			hh;
+	u64				basesHit = 0;
+	u32				h, ix;
+	int				l, acc, numLevels;
+	char*			env;
+
+	if (_end == 0) _end = _seq2->len;
+
+	if ((numThreads <= 1)
+	 || (_processor != process_for_simple_hit)
+	 || (origInfo->hp.gfExtend != gfexXDrop)
+	 || (origInfo->hp.posFilter)
+	 || (origInfo->hp.minMatches >= 0)
+	 || (origInfo->hp.hspThreshold.t != 'S')
+	 || (_selfCompare)
+	 || (_searchLimit != 0)
+	 || (_hitSeed->isHalfweight)
+	 || (_pt->asBits != NULL)
+	 || (seedHitQueueSize > 0)
+	 || (seed_search_dbgDumpRawHits) || (seed_search_dbgShowHits)
+	 || (seed_search_dbgShowCoverage)
+	 || (_end <= _start) || (_end > _seq2->len))
+		return seed_hit_search (_seq1, _pt, _seq2, _start, _end, _selfCompare,
+		                        _upperCharToBits, _hitSeed,
+		                        _searchLimit, _reportSearchLimit,
+#ifndef forbidBandWidth
+		                        _bandWidth,
+#endif // not forbidBandWidth
+		                        _processor, _processorInfo);
+
+	// 切块：默认约每线程 4 块，块长不短于 64 kb；快照点 1 kb、16 kb
+
+	len      = _end - _start;
+	chunkLen = len / (4 * (unspos) numThreads);
+	if (chunkLen < 65536) chunkLen = 65536;
+	snap[0]  = 1024;
+	snap[1]  = 16384;
+	numLevels = parMaxLevels;
+	env = getenv ("LASTZ_PAR_CHUNK");
+	if (env != NULL) { chunkLen = par_env_unspos (env);  if (chunkLen < 1) chunkLen = 1; }
+	env = getenv ("LASTZ_PAR_SNAP");
+	if (env != NULL)
+		{
+		char* comma = strchr (env, ',');
+		snap[0] = par_env_unspos (env);
+		snap[1] = (comma == NULL)? snap[0] : par_env_unspos (comma+1);
+		if (snap[1] < snap[0]) snap[1] = snap[0];
+		}
+
+	ctx.seq1            = _seq1;
+	ctx.pt              = _pt;
+	ctx.seq2            = _seq2;
+	ctx.start           = _start;
+	ctx.end             = _end;
+	ctx.upperCharToBits = _upperCharToBits;
+	ctx.hitSeed         = _hitSeed;
+#ifndef forbidBandWidth
+	ctx.bandWidth       = _bandWidth;
+#endif // not forbidBandWidth
+	ctx.workerInfo                 = *origInfo;
+	ctx.workerInfo.hp.reporter     = par_collect_hit;
+	ctx.workerInfo.hp.reporterInfo = NULL;
+	ctx.workerInfo.hp.anchors      = NULL;	// haveScores 由主线程在报告时设置
+	mainInfo = ctx.workerInfo;
+	ctx.numThreads = numThreads;
+	ctx.wEnd    = zalloc_or_die ("seed_hit_search_threaded", numThreads * sizeof(unspos*));
+	ctx.wStart  = zalloc_or_die ("seed_hit_search_threaded", numThreads * sizeof(unspos*));
+	ctx.wActual = zalloc_or_die ("seed_hit_search_threaded", numThreads * sizeof(sgnpos*));
+	ctx.wActive = zalloc_or_die ("seed_hit_search_threaded", numThreads * sizeof(u32*));
+	ctx.numChunks = (long) ((len + chunkLen - 1) / chunkLen);
+	ctx.chunks = zalloc_or_die ("seed_hit_search_threaded", ctx.numChunks * sizeof(parchunk));
+	for (k=0 ; k<ctx.numChunks ; k++)
+		{
+		c = &ctx.chunks[k];
+		c->qa = _start + (unspos) k * chunkLen;
+		c->qb = (k == ctx.numChunks-1)? _end : c->qa + chunkLen;
+		c->numLevels = 0;
+		for (l=0 ; l<numLevels ; l++)
+			{
+			unspos p = (c->qb - c->qa > snap[l])? c->qa + snap[l] : c->qb;
+			if ((l > 0) && (p == c->lev[l-1].p)) break;
+			c->lev[l].p = p;
+			c->numLevels++;
+			}
+		}
+	for (l=0 ; l<=parMaxLevels ; l++) accepted[l] = 0;
+	ctx.numStitched = 0;
+	ctx.window      = 2 * (long) numThreads + 2;
+	pthread_mutex_init (&ctx.mutex, NULL);
+	pthread_cond_init  (&ctx.cond,  NULL);
+
+	tin = zalloc_or_die ("seed_hit_search_threaded", diagHashSize * sizeof(unspos));
+
+	if (pthread_create (&helper, NULL, par_helper, &ctx) != 0)
+		suicide ("seed_hit_search_threaded: pthread_create failed");
+
+	// 主线程按块的顺序拼接
+
+	par_set_globals (&ctx, &mainInfo);
+	for (k=0 ; k<ctx.numChunks ; k++)
+		{
+		c = &ctx.chunks[k];
+		pthread_mutex_lock (&ctx.mutex);
+		while (!c->done) pthread_cond_wait (&ctx.cond, &ctx.mutex);
+		pthread_mutex_unlock (&ctx.mutex);
+
+		// 以块首的真实状态 Tin 重放，逐级检查快照点
+
+		empty_diag_hash ();
+		for (h=0 ; h<diagHashSize ; h++)
+			{
+			if (tin[h] == 0) continue;
+			activate_hashed_diag (h);
+			diagEnd[h] = tin[h];
+			}
+
+		replay.len = 0;
+		parOut = &replay;
+		from = c->qa;
+		acc  = -1;
+		for (l=0 ; l<c->numLevels ; l++)
+			{
+			S = &c->lev[l];
+			private_hit_search_range (_seq2->v + from, _seq2->v + S->p);
+			from = S->p;
+			if (par_check (S)) { acc = l;  break; }
+			}
+		if (acc < 0)
+			private_hit_search_range (_seq2->v + from, _seq2->v + c->qb);
+		parOut = NULL;
+		accepted[(acc < 0)? parMaxLevels : acc]++;
+
+		// 按顺序报告：重放部分，然后是工作线程在采纳的快照点之后的部分
+
+		for (ix=0 ; ix<replay.len ; ix++)
+			{
+			hh = &replay.h[ix];
+			if (origInfo->hp.anchors != NULL) (*(origInfo->hp.anchors))->haveScores = true;
+			basesHit += (*origInfo->hp.reporter) (origInfo->hp.reporterInfo, hh->pos1, hh->pos2, hh->length, hh->s);
+			}
+		if (acc >= 0)
+			{
+			S = &c->lev[acc];
+			for (ix=S->prefixCount ; ix<c->hits.len ; ix++)
+				{
+				hh = &c->hits.h[ix];
+				if (origInfo->hp.anchors != NULL) (*(origInfo->hp.anchors))->haveScores = true;
+				basesHit += (*origInfo->hp.reporter) (origInfo->hp.reporterInfo, hh->pos1, hh->pos2, hh->length, hh->s);
+				}
+			}
+
+		// 块尾的真实状态
+
+		for (h=0 ; h<diagHashSize ; h++)
+			{
+			tp = diag_end_value (h);
+			if ((acc >= 0) && (c->lev[acc].e[h] > tp)) tp = c->lev[acc].e[h];
+			tin[h] = tp;
+			}
+
+		par_free_chunk (c);
+
+		pthread_mutex_lock (&ctx.mutex);
+		ctx.numStitched = k+1;
+		pthread_cond_broadcast (&ctx.cond);
+		pthread_mutex_unlock (&ctx.mutex);
+		}
+
+	pthread_join (helper, NULL);
+
+	if (getenv ("LASTZ_PAR_REPORT") != NULL)
+		{
+		fprintf (stderr, "seed_hit_search_threaded: %ld chunks of %u bp, snapshots",
+		                 ctx.numChunks, (unsigned) chunkLen);
+		for (l=0 ; l<numLevels ; l++)
+			fprintf (stderr, " %u:%ld", (unsigned) snap[l], accepted[l]);
+		fprintf (stderr, " replayed-to-end:%ld\n", accepted[parMaxLevels]);
+		}
+
+	// 清理（主线程的哈希留给下一次 empty_diag_hash）
+
+	for (l=0 ; l<numThreads ; l++)
+		{
+		free_if_valid ("par (diagEnd)",    ctx.wEnd[l]);
+		free_if_valid ("par (diagStart)",  ctx.wStart[l]);
+		free_if_valid ("par (diagActual)", ctx.wActual[l]);
+		free_if_valid ("par (diagActive)", ctx.wActive[l]);
+		}
+	free_if_valid ("par (wEnd)",    ctx.wEnd);
+	free_if_valid ("par (wStart)",  ctx.wStart);
+	free_if_valid ("par (wActual)", ctx.wActual);
+	free_if_valid ("par (wActive)", ctx.wActive);
+	free_if_valid ("par (chunks)",  ctx.chunks);
+	free_if_valid ("par (replay)",  replay.h);
+	free_if_valid ("par (tin)",     tin);
+	pthread_mutex_destroy (&ctx.mutex);
+	pthread_cond_destroy  (&ctx.cond);
+
+	return basesHit;
+	}
+
+#endif // not densityFiltering
+
 
 // private_hit_search-- seed requires two bits per unpacked bp
 //
@@ -463,9 +1024,18 @@ void free_seed_hit_search (void) { free_diag_hash (); }
 
 static u64 private_hit_search (void)
 	{
+	return private_hit_search_range (seq2->v + start, seq2->v + end);
+	}
+
+// private_hit_search_range--
+//	只处理词尾落在 [qFirst,qStop) 的种子词。扫描从 qFirst 往前退 seedLength-1
+//	个碱基开始（不早于 start），所以这些位置上的命中、命中顺序都与从 start 起
+//	整段扫描相同；qFirst = seq2->v + start 时就是原来的 private_hit_search。
+
+static u64 private_hit_search_range (u8* qFirst, u8* qStop)
+	{
 	int		seedLength;
-	u8* 	qStart = seq2->v + start;
-	u8* 	qStop  = seq2->v + end;
+	u8* 	qStart;
 	u8* 	q;
 	u64		w;
 	s32		ww;
@@ -485,6 +1055,13 @@ static u64 private_hit_search (void)
 
 	if (seq2->len < (unsigned) seedLength)
 		return 0; // (nothing to search for)
+
+	if (qFirst - (seq2->v + start) >= seedLength-1) qStart = qFirst - (seedLength-1);
+	                                          else qStart = seq2->v + start;
+
+	batchHits = (processor == process_for_simple_hit)
+	         && (hitSeed->withTrans <= 1)
+	         && (!seed_search_dbgDumpRawHits);
 
 	// scan the sequence, processing each seed match
 
@@ -519,6 +1096,11 @@ static u64 private_hit_search (void)
 			prevRawHits = seedSearchStats.rawSeedHits;
 #endif // collect_stats && maxHitsPerColumn
 			debugSearchPos2_1;
+			if (batchHits)
+				{
+				basesHit += find_table_matches_batched (packed, pos2);
+				goto position_done;
+				}
 			basesHit += find_table_matches (packed, pos2);
 
 			// generate seed hits for all seed matches with 1 or 2 transitions
@@ -548,6 +1130,7 @@ static u64 private_hit_search (void)
 					}
 				}
 
+		position_done:
 			if ((searchLimit > 0) && (searchToGo < 0))
 				{ warn_for_search_limit ();  return basesHit; }
 
@@ -875,6 +1458,69 @@ static u64 find_table_matches
 	}
 
 
+static u32 collect_table_matches
+   (u32		packed2,
+	unspos	pos2,
+	u32		n)
+	{
+	unspos	adjStart = pt->adjStart;
+	u32		step     = pt->step;
+	unspos	pos, pos1;
+
+	if (pt->last[packed2] == 0) return n;
+
+	for (pos=pt->last[packed2] ; pos!=noPreviousPos ; pos=pt->prev[pos])
+		{
+		pos1 = adjStart + step*pos;
+		if ((selfCompare) && (seed_hit_below_diagonal (pos1, pos2)))
+			continue;
+#ifndef forbidBandWidth
+		if ((sameStrand) && (bandWidth > 0) && (pos2-pos1 > bandWidth))
+			continue;
+#endif // not forbidBandWidth
+		if (n == hitBufCap)
+			{
+			hitBufCap = (hitBufCap == 0)? 1024 : 2*hitBufCap;
+			hitBuf = realloc_or_die ("hitBuf", hitBuf, hitBufCap * sizeof(unspos));
+			}
+		hitBuf[n++] = pos1;
+		}
+	return n;
+	}
+
+static u64 find_table_matches_batched
+   (u32		packed,
+	unspos	pos2)
+	{
+	u32		seedLength = (unsigned) hitSeed->length;
+	u32		n, ix;
+	u32*	f1;
+	u64		basesHit = 0;
+
+	n = collect_table_matches (packed, pos2, 0);
+	if (hitSeed->withTrans == 1)
+		{
+		for (f1=hitSeed->transFlips ; *f1!=0 ; f1++)
+			n = collect_table_matches (packed ^ (*f1), pos2, n);
+		}
+
+	for (ix=0 ; ix<n ; ix++)
+		{
+		const u8* p = seq1->v + hitBuf[ix];
+		__builtin_prefetch (p);
+		if (hitBuf[ix] >= 48) __builtin_prefetch (p - 48);
+		__builtin_prefetch (p + 48);
+		}
+
+	for (ix=0 ; ix<n ; ix++)
+		{
+		seed_search_count_stat (rawSeedHits);
+		basesHit += (*processor) (processorInfo, hitBuf[ix], pos2, seedLength);
+		}
+
+	return basesHit;
+	}
+
 static u64 find_table_matches_resolve
    (u32		packed2,
 	unspos	pos2,
@@ -1122,6 +1768,7 @@ u64 process_for_simple_hit
 		                 hDiag, diagEnd[hDiag],
 		                 pos1, pos2, start2, pos2);
 #endif // snoopDiagHash
+		if (parRec != NULL) par_note_skip (hDiag, pos2-length);
 		return 0;
 		}
 
@@ -2534,6 +3181,7 @@ static score xdrop_extend_seed_hit
 	unspos			pos1    = *_pos1;
 	unspos			pos2    = *_pos2;
 	unspos			length  = *_length;
+	unspos			seedStart2 = pos2 - length;	// （多线程记录用）
 	seq*			seq1    = hp->seq1;
 	seq*			seq2    = hp->seq2;
 	scoreset*		scoring = hp->scoring;
@@ -2629,6 +3277,12 @@ static score xdrop_extend_seed_hit
 			leftStart = s1;
 			leftScore = runScore;
 			}
+		}
+
+	if (parRec != NULL)
+		{
+		parLeftReach   = ((sgnpos) (s1 - seq1->v)) - diag;
+		parLeftBlocked = (s1 <= stop) && (runScore >= leftScore-xDrop);
 		}
 
 	// adjust length if the extension is shorter than the hit
@@ -2783,6 +3437,8 @@ static score xdrop_extend_seed_hit
 	// record the extent
 
 	extent = (unspos) (((sgnpos) (rightBlock-seq1->v)) - diag);
+	if (parRec != NULL)
+		par_note_extend (hDiag, seedStart2, parLeftReach, parLeftBlocked, extent);
 	if (extent > diagEnd[hDiag])
 		{
 		diagEnd   [hDiag] = extent;

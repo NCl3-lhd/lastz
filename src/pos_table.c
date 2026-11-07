@@ -26,6 +26,7 @@
 #include "dna_utilities.h"		// dna/scoring stuff
 #include "sequences.h"			// sequence stuff
 #include "seeds.h"				// seed matching stuff
+#include "kthread.h"			// kt_for（klib），多线程建表
 
 #define  pos_table_owner		// (make this the owner of its globals)
 #include "pos_table.h"			// interface to this module
@@ -81,6 +82,9 @@ struct
 //
 //----------
 
+static void record_seed_positions_part
+                         (postable* pt, seq* seq, const s8* upperCharToBits, seed* hitSeed,
+                          u32 part, u32 numParts);
 static void record_seed_positions
                          (postable* pt, seq* seq,
                           const s8 upperCharToBits[], seed* hitSeed);
@@ -149,8 +153,46 @@ postable* build_seed_position_table
 	seed*		hitSeed,
 	u32			step)
 	{
+	return build_seed_position_table_threaded (1, seq, start, end,
+	                                           upperCharToBits, hitSeed, step);
+	}
+
+// build_seed_position_table_threaded--
+//	同 build_seed_position_table，用 numThreads 个线程按词的取值范围分工
+//	（record_seed_positions_part）；表与单线程逐字节相同。半权、分辨位种子
+//	仍单线程。
+
+typedef struct posbuildctx
+	{
+	postable*	pt;
+	seq*		seq;
+	const s8*	upperCharToBits;
+	seed*		hitSeed;
+	u32			numParts;
+	} posbuildctx;
+
+static void posbuild_worker
+   (void*	data,
+	long	part,
+	arg_dont_complain(int tid))
+	{
+	posbuildctx* ctx = (posbuildctx*) data;
+	record_seed_positions_part (ctx->pt, ctx->seq, ctx->upperCharToBits,
+	                            ctx->hitSeed, (u32) part, ctx->numParts);
+	}
+
+postable* build_seed_position_table_threaded
+   (int			numThreads,
+	seq*		seq,
+	unspos		start,
+	unspos		end,
+	const s8	upperCharToBits[],
+	seed*		hitSeed,
+	u32			step)
+	{
 	postable*	pt;
 	dumpinfo	di;
+	posbuildctx	ctx;
 
 	// sanity check
 
@@ -186,6 +228,15 @@ postable* build_seed_position_table
 		record_seed_positions_halfweight (pt, seq, upperCharToBits, hitSeed);
 	else if (pt->asBits != NULL)
 		record_seed_positions_bits       (pt, seq, upperCharToBits, hitSeed);
+	else if (numThreads > 1)
+		{
+		ctx.pt              = pt;
+		ctx.seq             = seq;
+		ctx.upperCharToBits = upperCharToBits;
+		ctx.hitSeed         = hitSeed;
+		ctx.numParts        = (u32) numThreads;
+		kt_for (numThreads, posbuild_worker, &ctx, numThreads);
+		}
 	else
 		record_seed_positions            (pt, seq, upperCharToBits, hitSeed);
 
@@ -398,6 +449,20 @@ static void record_seed_positions
 	seq*		seq,
 	const s8	upperCharToBits[],
 	seed*		hitSeed)
+	{ record_seed_positions_part (pt, seq, upperCharToBits, hitSeed, 0, 1); }
+
+// record_seed_positions_part--
+//	同 record_seed_positions，但只登记 packed*numParts/wordEntries == part 的
+//	词。各部分登记的词互不相交，一个位置只属于一个词，所以各部分写入的
+//	last[]、prev[] 元素互不相交；每个词的链仍按位置从左到右前插，与串行相同。
+
+static void record_seed_positions_part
+   (postable*	pt,
+	seq*		seq,
+	const s8	upperCharToBits[],
+	seed*		hitSeed,
+	u32			part,
+	u32			numParts)
 	{
 	u32			step = pt->step;
 	u32			seedLength;
@@ -458,7 +523,9 @@ static void record_seed_positions
 				}
 
 			packed = apply_seed (hitSeed, w);		// extract seed bits
-			add_word (pt, packed, pos);				// add it to the table
+			if ((numParts == 1)
+			 || ((u32) ((((u64) packed) * numParts) / pt->wordEntries) == part))
+				add_word (pt, packed, pos);			// add it to the table
 #ifdef debugTablePos1
 			if (pos == debugTablePos1)
 				printf ("recording %s at seq 1 pos " unsposFmt "\n",

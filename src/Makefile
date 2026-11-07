@@ -82,7 +82,7 @@ srcFiles = lastz infer_scores \
            segment edit_script                                            \
            identity_dist coverage_dist continuity_dist                    \
            output gfa lav axt maf cigar sam genpaf text_align align_diffs \
-           utilities dna_utilities sequences capsule
+           utilities dna_utilities sequences capsule kthread
 
 incFiles = lastz.h infer_scores.h \
            seeds.h pos_table.h quantum.h seed_search.h diag_hash.h                            \
@@ -90,7 +90,7 @@ incFiles = lastz.h infer_scores.h \
            segment.h edit_script.h                                                            \
            identity_dist.h coverage_dist.h continuity_dist.h                                  \
            output.h gfa.h lav.h axt.h maf.h sam.h cigar.h genpaf.h text_align.h align_diffs.h \
-           utilities.h dna_utilities.h sequences.h capsule.h
+           utilities.h dna_utilities.h sequences.h capsule.h kthread.h
 
 %.o: %.c version.mak ${incFiles}
 	${CC} ${CPPFLAGS} -c ${CFLAGS} -Dscore_type=I $< -o $@
@@ -106,16 +106,16 @@ incFiles = lastz.h infer_scores.h \
 
 
 lastz: $(foreach part,${srcFiles},${part}.o)
-	${CC} ${LDFLAGS} $(foreach part,${srcFiles},${part}.o) -lm -o $@
+	${CC} ${LDFLAGS} $(foreach part,${srcFiles},${part}.o) -lpthread -lm -o $@
 
 lastz_D: $(foreach part,${srcFiles},${part}_D.o)
-	${CC} ${LDFLAGS} $(foreach part,${srcFiles},${part}_D.o) -lm -o $@
+	${CC} ${LDFLAGS} $(foreach part,${srcFiles},${part}_D.o) -lpthread -lm -o $@
 
 lastz_32: $(foreach part,${srcFiles},${part}_32.o)
-	${CC} ${LDFLAGS} $(foreach part,${srcFiles},${part}_32.o) -lm -o $@
+	${CC} ${LDFLAGS} $(foreach part,${srcFiles},${part}_32.o) -lpthread -lm -o $@
 
 lastz_40: $(foreach part,${srcFiles},${part}_40.o)
-	${CC} ${LDFLAGS} $(foreach part,${srcFiles},${part}_40.o) -lm -o $@
+	${CC} ${LDFLAGS} $(foreach part,${srcFiles},${part}_40.o) -lpthread -lm -o $@
 
 # cleanup
 
@@ -220,8 +220,8 @@ nlrechain_test: nlrechain_test.c nlrechain.c ${nlrechainTestObjs} version.mak ${
 # realign 单元测试（docs/realign_plan.md §4 第 1 步）；realign_test.c 直接包含
 # realign.c；score_alignment 来自 gapped_extend.o
 
-realign_test: realign_test.c realign.c ${nlrechainTestObjs} version.mak ${incFiles}
-	${CC} ${CPPFLAGS} ${CFLAGS} -Dscore_type=I realign_test.c ${nlrechainTestObjs} -lm -o $@
+realign_test: realign_test.c realign.c ${nlrechainTestObjs} kthread.o version.mak ${incFiles}
+	${CC} ${CPPFLAGS} ${CFLAGS} -Dscore_type=I realign_test.c ${nlrechainTestObjs} kthread.o -lpthread -lm -o $@
 	./realign_test
 
 lavCompare = ../tools/lav_compare.py

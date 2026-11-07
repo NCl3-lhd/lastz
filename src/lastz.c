@@ -402,6 +402,7 @@ static const control defaultParams =
 	NULL,								// nlrReportFilename
 	{ false, 0, 0, true,				// realign: enabled, gapOpen, gapExtend, rightAlign,
 	  false, 0, 0 },					//          mea, meaLambdaScale, meaTheta
+	1,									// numThreads
 	true,								// gappedExtend
 
 	NULL,NULL,							// scoring, maskedScoring
@@ -1261,8 +1262,9 @@ next_target:
 								izParams.step);
 		else if (!currParams->targetIsQuantum)
 			{
-			targPositions = build_seed_position_table
-							   (target, 0, target->len,
+			targPositions = build_seed_position_table_threaded
+							   (currParams->numThreads,
+							    target, 0, target->len,
 								currParams->upperCharToBits, currParams->hitSeed,
 								currParams->step);
 			if (currParams->wordCountKeep > 0)
@@ -3164,7 +3166,8 @@ int start_one_strand
 		{
 #if ((!defined densityFiltering) && (defined forbidBandWidth))
 		// === density filtering DISabled  and  band width DISabled
-		seed_hit_search (target, targPositions,
+		seed_hit_search_threaded (currParams->numThreads,
+		                 target, targPositions,
 		                 query, 0, query->len, currParams->selfCompare,
 		                 currParams->upperCharToBits, currParams->hitSeed,
 		                 searchLimit,
@@ -3187,7 +3190,8 @@ int start_one_strand
 
 #if ((!defined densityFiltering) && (!defined forbidBandWidth))
 		// === density filtering DISabled  and  band width ENabled
-		seed_hit_search (target, targPositions,
+		seed_hit_search_threaded (currParams->numThreads,
+		                 target, targPositions,
 		                 query, 0, query->len, currParams->selfCompare,
 		                 currParams->upperCharToBits, currParams->hitSeed,
 		                 searchLimit,
@@ -3580,7 +3584,8 @@ void finish_one_strand
 	if ((alignList != NULL) && (currParams->realign.enabled))
 		{
 		dbg_timing_sub (debugClockRealign);
-		alignList = realign_aligns (target, query, currParams->scoring,
+		alignList = realign_aligns_threaded (currParams->numThreads,
+		                            target, query, currParams->scoring,
 		                            alignList, &currParams->realign);
 		dbg_timing_add (debugClockRealign);
 		}
@@ -5149,6 +5154,9 @@ static void all_options (void)
 //	fprintf (helpout, "  --progress+masking=<n> report processing of every nth query, and include\n");
 //	fprintf (helpout, "                         masking stats (useful with --masking)\n");
 
+	fprintf (helpout, "  --threads=<N>          use N worker threads (default is 1);  output is the\n");
+	fprintf (helpout, "                         same for any N\n");
+
 	fprintf (helpout, "  --version              report the program version and quit\n");
 	fprintf (helpout, "  --help                 list all options\n");
 	fprintf (helpout, "  --help=files           list information about file specifiers\n");
@@ -6444,6 +6452,16 @@ static void parse_options_loop
 			else
 				chastise ("--realign tie direction must be right or left (not \"%s\")\n", tieStr);
 			lzParams->realign.enabled = true;
+			goto next_arg;
+			}
+
+		// --threads=<N>（docs/parallel_plan.md）
+
+		if (strcmp_prefix (arg, "--threads=") == 0)
+			{
+			lzParams->numThreads = string_to_int (argStr);
+			if (lzParams->numThreads < 1)
+				chastise ("--threads must be at least 1\n");
 			goto next_arg;
 			}
 
