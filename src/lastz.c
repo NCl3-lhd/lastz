@@ -400,7 +400,8 @@ static const control defaultParams =
 	  NULL },							//      reportFile
 	-1,-1,								// nlInnerJump, nlInnerSolo
 	NULL,								// nlrReportFilename
-	{ false, 0, 0, true },				// realign: enabled, gapOpen, gapExtend, rightAlign
+	{ false, 0, 0, true,				// realign: enabled, gapOpen, gapExtend, rightAlign,
+	  false, 0, 0 },					//          mea, meaLambdaScale, meaTheta
 	true,								// gappedExtend
 
 	NULL,NULL,							// scoring, maskedScoring
@@ -4972,6 +4973,11 @@ static void all_options (void)
 	fprintf (helpout, "                         alignment by banded global realignment with these gap\n");
 	fprintf (helpout, "                         penalties (endpoints unchanged);  ties put indels to\n");
 	fprintf (helpout, "                         the right (default) or left\n");
+	fprintf (helpout, "  --mea=<lambda scale>,<theta>\n");
+	fprintf (helpout, "                         with --realign, choose the path maximizing the sum of\n");
+	fprintf (helpout, "                         (posterior - theta) over aligned pairs, posteriors from\n");
+	fprintf (helpout, "                         path weights exp(lambda*score), lambda = scale times\n");
+	fprintf (helpout, "                         the scoring matrix's Karlin-Altschul lambda\n");
 	fprintf (helpout, "  --xdrop=<score>        set x-drop threshold (default is 10*sub[A][A])\n");
 	fprintf (helpout, "  --ydrop=<score>        set y-drop threshold (default is open+300extend)\n");
 	fprintf (helpout, "  --noxtrim              if x-drop extension encounters end of sequence, don't\n");
@@ -6438,6 +6444,26 @@ static void parse_options_loop
 			else
 				chastise ("--realign tie direction must be right or left (not \"%s\")\n", tieStr);
 			lzParams->realign.enabled = true;
+			goto next_arg;
+			}
+
+		// --mea=<lambda scale>,<theta>（docs/mea_plan.md）
+
+		if (strcmp_prefix (arg, "--mea=") == 0)
+			{
+			char* thetaStr;
+			if (lzParams->realign.mea) goto duplicated_option;
+			thetaStr = strchr (argStr, ',');
+			if (thetaStr == NULL)
+				chastise ("--mea requires <lambda scale>,<theta>\n");
+			*(thetaStr++) = 0;
+			lzParams->realign.meaLambdaScale = string_to_double (argStr);
+			lzParams->realign.meaTheta       = string_to_double (thetaStr);
+			if (!(lzParams->realign.meaLambdaScale > 0))
+				chastise ("--mea lambda scale must be positive\n");
+			if (!((lzParams->realign.meaTheta >= 0) && (lzParams->realign.meaTheta < 1)))
+				chastise ("--mea theta must be in [0,1)\n");
+			lzParams->realign.mea = true;
 			goto next_arg;
 			}
 
@@ -9607,6 +9633,8 @@ static void parse_options
 
 	if ((lzParams->realign.enabled) && (!lzParams->gappedExtend))
 		chastise ("--realign requires gapped extension (it can't be used with --nogapped or --format=segments)\n");
+	if ((lzParams->realign.mea) && (!lzParams->realign.enabled))
+		chastise ("--mea requires --realign\n");
 
 	if (!lzParams->gappedExtend)
 		{

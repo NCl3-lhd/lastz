@@ -40,6 +40,9 @@ typedef struct realignparams
 	score		gapOpen;		// 重比对用的 gap 罚分；长 l 的 gap 罚
 	score		gapExtend;		// .. gapOpen + l*gapExtend
 	int			rightAlign;		// true => 平局时 indel 靠右；false => 靠左
+	int			mea;			// true => 段内改用后验最优路径（MEA，docs/mea_plan.md）
+	double		meaLambdaScale;	// 路径权重 exp(λ·分)，λ = 此倍数 × 打分矩阵的 λ_KA
+	double		meaTheta;		// MEA 目标 Σ_匹配列 (后验 − θ)，gap 列记 0
 	} realignparams;
 
 //----------
@@ -58,6 +61,10 @@ global struct
 	u64 numImproved;			// 重比对分高于原路径的段数
 	u64 colsIn;					// 重比对前的比对列数
 	u64 colsOut;				// 重比对后的比对列数
+	u64 meaChunks;				// 做了 MEA 的段数
+	u64 meaWidened;				// MEA 路径碰到带边而加宽重算的次数
+	u64 meaFallback;			// 矩阵过大或数值下溢、保留 Viterbi 路径的段数
+	u64 meaChanged;				// MEA 路径与 Viterbi 路径不同的段数
 	} realignStats;
 
 #define realign_count_stat(field)   ++realignStats.field

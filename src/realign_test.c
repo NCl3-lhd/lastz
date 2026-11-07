@@ -428,7 +428,7 @@ static void script_lengths (editscript* s, u64* ct, u64* cq)
 static void test_widening (void)
 	{
 	scoreset*		sc = hoxd70 ();
-	realignparams	p = { true, 400, 8, true };
+	realignparams	p = { true, 400, 8, true, false, 0, 0 };
 	u8				t[300], q[300];
 	u32				k, len = 300;
 	testaln			x;
@@ -465,7 +465,7 @@ static void test_widening (void)
 
 static void tie_case (scoreset* sc, const char* ts, const char* qs, int right, const char* expect)
 	{
-	realignparams	p = { true, 400, 30, right };
+	realignparams	p = { true, 400, 30, right, false, 0, 0 };
 	u8				fwd[64];
 	char			buf[64];
 	score			best;
@@ -518,6 +518,7 @@ static void test_realign_one (u32 rounds)
 		u64				ct, cq, c0 = realignStats.numChunks;
 
 		p.enabled = true;  p.gapOpen = gaps[g][0];  p.gapExtend = gaps[g][1];  p.rightAlign = rnd(2);
+		p.mea = false;
 		before = script_realign_score (sc, &p, &x);
 		realign_aligns (x.target, x.query, sc, x.a, &p);
 		after = script_realign_score (sc, &p, &x);
@@ -603,6 +604,292 @@ static int tsv_mode (int argc, char** argv)
 
 //----------
 //
+// (5) MEA 对穷举：小例子枚举带内全部全局路径（列操作序列），按 exp(λ·S) 精确求
+//	后验与 MEA 最优目标，与 mea_posteriors / mea_decode 比较
+//
+//----------
+
+#define enumMax 8
+
+static const u8*		enT;
+static const u8*		enQ;
+static u32				enLt, enLq;
+static u64				enW;
+static scoreset*		enSc;
+static const realignparams* enP;
+static double			enLambda;
+static double			enZ;
+static double			enPost[enumMax+1][enumMax+1];
+static double			enTheta;
+static double			enBestObj;
+static u64				enPaths;
+static u8				enOp[2*enumMax+2];
+
+static void enum_rec (u32 n, u32 i, u32 j, int pass)
+	{
+	u32		k, a, b;
+	double	wt, obj;
+
+	if (((i > j)? i - j : j - i) > enW) return;
+	if ((i == enLt) && (j == enLq))
+		{
+		wt = exp (enLambda * (double) path_score (enSc, enP, enT, enQ, enOp, n));
+		if (pass == 0)
+			{
+			enZ += wt;  enPaths++;
+			for (k=0, a=0, b=0 ; k<n ; k++)
+				{
+				if (enOp[k] != colIns) a++;
+				if (enOp[k] != colDel) b++;
+				if (enOp[k] == colSub) enPost[a][b] += wt;
+				}
+			}
+		else
+			{
+			obj = 0;
+			for (k=0, a=0, b=0 ; k<n ; k++)
+				{
+				if (enOp[k] != colIns) a++;
+				if (enOp[k] != colDel) b++;
+				if (enOp[k] == colSub) obj += enPost[a][b] - enTheta;
+				}
+			if (obj > enBestObj) enBestObj = obj;
+			}
+		return;
+		}
+	if ((i < enLt) && (j < enLq)) { enOp[n] = colSub;  enum_rec (n+1, i+1, j+1, pass); }
+	if (j < enLq)                 { enOp[n] = colIns;  enum_rec (n+1, i,   j+1, pass); }
+	if (i < enLt)                 { enOp[n] = colDel;  enum_rec (n+1, i+1, j,   pass); }
+	}
+
+static void test_mea_vs_enum (u32 rounds)
+	{
+	scoreset*	sets[2];
+	score		gaps[4][2] = { { 400, 30 }, { 400, 8 }, { 150, 10 }, { 300, 0 } };
+	double		scales[4] = { 0.5, 1, 2, 5 };
+	double		thetas[4] = { 0, 0.25, 0.5, 0.8 };
+	u8			t[enumMax], q[enumMax], fwd[2*enumMax+2];
+	u32			r, i, j;
+	u64			n, ct, cq, width, wMin, maxPaths = 0;
+	double		obj, maxErr = 0, err;
+	realignparams p;
+
+	sets[0] = hoxd55 ();  sets[1] = hoxd70 ();
+	for (r=0 ; r<rounds ; r++)
+		{
+		scoreset* sc = sets[rnd(2)];
+		u32 g = rnd(4);
+		memset (&p, 0, sizeof(p));
+		p.enabled = true;  p.gapOpen = gaps[g][0];  p.gapExtend = gaps[g][1];
+		p.rightAlign = rnd(2);
+		p.mea = true;  p.meaLambdaScale = scales[rnd(4)];  p.meaTheta = thetas[rnd(4)];
+		enLt = rnd(enumMax-1);  enLq = rnd(enumMax-1);	// 0..6
+		random_bases (t, enLt, 1 + rnd(5));
+		random_bases (q, enLq, 1 + rnd(5));
+		wMin = (enLt > enLq)? enLt - enLq : enLq - enLt;
+		enW = wMin + rnd(4);
+		if (rnd(3) == 0) enW = 100;
+
+		mea_prepare (sc, &p);
+		enT = t;  enQ = q;  enSc = sc;  enP = &p;
+		enLambda = p.meaLambdaScale * mea_lambda_ka (sc);
+		enZ = 0;  enPaths = 0;
+		memset (enPost, 0, sizeof(enPost));
+		enum_rec (0, 0, 0, 0);
+		if (enPaths > maxPaths) maxPaths = enPaths;
+		for (i=0 ; i<=enLt ; i++) for (j=0 ; j<=enLq ; j++) enPost[i][j] /= enZ;
+
+		check (mea_posteriors (t, enLt, q, enLq, enW), "mea_posteriors failed (lt=%u lq=%u)", enLt, enLq);
+		width = 2*enW + 1;
+		for (i=1 ; i<=enLt ; i++) for (j=1 ; j<=enLq ; j++)
+			{
+			u64 off = (i > j)? i - j : j - i;
+			if (off > enW) continue;
+			err = fabs (post[i*width + (j+enW-i)] - enPost[i][j]);
+			if (err > maxErr) maxErr = err;
+			check (err <= 1e-9, "posterior (%u,%u) %.12g vs enum %.12g (lt=%u lq=%u w=%" PRIu64 ")",
+			       i, j, post[i*width + (j+enW-i)], enPost[i][j], enLt, enLq, enW);
+			}
+
+		enTheta = p.meaTheta;  enBestObj = -1e300;
+		enum_rec (0, 0, 0, 1);
+		n = mea_decode (enLt, enLq, enW, p.meaTheta, p.rightAlign, &obj);
+		check (fabs (obj - enBestObj) <= 1e-9, "MEA objective %.12g vs enum %.12g", obj, enBestObj);
+		check (fabs (mea_path_obj (newOp, n, enW, p.meaTheta) - obj) <= 1e-9, "MEA path objective != DP value");
+		reverse_ops (newOp, n, fwd);
+		op_lengths (fwd, n, &ct, &cq);
+		check ((ct == enLt) && (cq == enLq), "MEA path consumes %" PRIu64 ",%" PRIu64 " of %u,%u", ct, cq, enLt, enLq);
+		check (max_drift (fwd, n) <= enW, "MEA path leaves band");
+		}
+	fprintf (stderr, "mea_vs_enum: %u cases, max paths %" PRIu64 ", max posterior error %.3g\n",
+	         rounds, maxPaths, maxErr);
+	free_score_set ("hoxd55", sets[0]);
+	free_score_set ("hoxd70", sets[1]);
+	}
+
+//----------
+//
+// (6) λ 很大时后验集中到 Viterbi 路径：θ = 0.5 时 MEA 的对齐碱基对集合应等于
+//	Viterbi 的（左右对齐的 Viterbi 路径不同的例子有平局，跳过）
+//
+//----------
+
+static void pair_set (const u8* opRev, u64 n, u8* mark, u32 lq)
+	{
+	u64 k;
+	u32 i = 0, j = 0;
+	for (k=n ; k>0 ; )
+		{
+		switch (opRev[--k])
+			{
+			case colSub: i++;  j++;  mark[i*(lq+1)+j] = 1;  break;
+			case colIns: j++;  break;
+			default:     i++;  break;
+			}
+		}
+	}
+
+static void test_mea_sharp (u32 rounds)
+	{
+	scoreset*	sc = hoxd70 ();
+	realignparams p;
+	u8			t[80], q[200], *mv, *mm, *vr;
+	u32			r, lt, lq, k, m, used = 0, agree = 0, fallback = 0;
+	u64			nl, nr, n, w, fb;
+	score		best;
+
+	mv = (u8*) malloc_or_die ("mv", 81*201);
+	mm = (u8*) malloc_or_die ("mm", 81*201);
+	vr = (u8*) malloc_or_die ("vr", 300);
+	for (r=0 ; r<rounds ; r++)
+		{
+		memset (&p, 0, sizeof(p));
+		p.enabled = true;  p.gapOpen = 400;  p.gapExtend = 30;
+		p.mea = true;  p.meaLambdaScale = 30;  p.meaTheta = 0.5;
+		lt = 20 + rnd(60);
+		random_bases (t, lt, 4);
+		for (k=0, m=0 ; k<lt ; k++)
+			{
+			double x = rnd01();
+			if (x < 0.04) continue;
+			if (x < 0.08) { q[m++] = "ACGT"[rnd(4)]; }
+			q[m++] = (rnd01() < 0.2)? "ACGT"[rnd(4)] : t[k];
+			}
+		lq = m;
+		w = 200;
+
+		p.rightAlign = false;
+		nl = banded_global (sc, &p, t, lt, q, lq, w, &best);
+		memset (mv, 0, 81*201);  pair_set (newOp, nl, mv, lq);
+		p.rightAlign = true;
+		nr = banded_global (sc, &p, t, lt, q, lq, w, &best);
+		memset (mm, 0, 81*201);  pair_set (newOp, nr, mm, lq);
+		if (memcmp (mv, mm, (lt+1)*(lq+1)) != 0) continue;	// 平局
+		memcpy (vr, newOp, nr);
+
+		mea_prepare (sc, &p);
+		memcpy (newOp, vr, nr);
+		fb = realignStats.meaFallback;
+		n = mea_chunk (t, lt, q, lq, w, w, nr, &p);
+		if (realignStats.meaFallback != fb) { fallback++;  continue; }
+		used++;
+		memset (mm, 0, 81*201);  pair_set (newOp, n, mm, lq);
+		if (memcmp (mv, mm, (lt+1)*(lq+1)) == 0) agree++;
+		}
+	check (used > rounds/5, "too few tie-free cases (%u of %u)", used, rounds);
+	check (agree >= used - used/50, "sharp MEA agrees with Viterbi in only %u of %u cases", agree, used);
+	fprintf (stderr, "mea_sharp: %u of %u tie-free cases agree with Viterbi (%u fell back)\n", agree, used, fallback);
+	free (mv);  free (mm);  free (vr);
+	free_score_set ("hoxd70", sc);
+	}
+
+//----------
+//
+// (6b) MEA 平局方向：gap 列记 0，匹配后验低于 θ 时插入与删除的先后只由平局规
+//	则决定；right 时删除在后（与 banded_global 的优先次序相同），left 时插入在后
+//
+//----------
+
+static void mea_tie_case (scoreset* sc, const char* ts, const char* qs, int right, double theta,
+                          const char* expect)
+	{
+	realignparams	p = { true, 400, 30, right, true, 1, theta };
+	u8				fwd[64];
+	char			buf[64];
+	double			obj;
+	u64				n, lt = strlen(ts), lq = strlen(qs), w = 20;
+
+	mea_prepare (sc, &p);
+	check (mea_posteriors ((const u8*) ts, lt, (const u8*) qs, lq, w), "mea_posteriors failed");
+	n = mea_decode (lt, lq, w, theta, right, &obj);
+	reverse_ops (newOp, n, fwd);
+	op_string (fwd, n, buf, sizeof(buf));
+	check (strcmp (buf, expect) == 0, "MEA tie %s vs %s right=%d theta=%g: got %s, expected %s",
+	       ts, qs, right, theta, buf, expect);
+	}
+
+static void test_mea_ties (void)
+	{
+	scoreset* sc = hoxd70 ();
+	mea_tie_case (sc, "A",  "AA", true,  0.8, "IID");	// 两种匹配的后验约各 0.5
+	mea_tie_case (sc, "A",  "AA", false, 0.8, "DII");
+	mea_tie_case (sc, "AA", "A",  true,  0.8, "IDD");
+	mea_tie_case (sc, "AA", "A",  false, 0.8, "DDI");
+	free_score_set ("hoxd70", sc);
+	}
+
+//----------
+//
+// (7) realign_aligns 开 MEA 时的整体性质
+//
+//----------
+
+static void test_realign_one_mea (u32 rounds)
+	{
+	scoreset*		sets[2];
+	score			gaps[3][2] = { { 400, 8 }, { 400, 30 }, { 200, 10 } };
+	double			scales[3] = { 0.5, 1, 2 };
+	double			thetas[3] = { 0, 0.25, 0.5 };
+	u32				r;
+	u64				chunks0 = realignStats.numChunks, mea0 = realignStats.meaChunks;
+	u64				fb0 = realignStats.meaFallback, ch0 = realignStats.meaChanged;
+
+	sets[0] = hoxd55 ();  sets[1] = hoxd70 ();
+	for (r=0 ; r<rounds ; r++)
+		{
+		scoreset*		sc = sets[rnd(2)];
+		u32				g = rnd(3);
+		realignparams	p;
+		u32				coreLen = (rnd(4) == 0)? 2000 + rnd(6000) : 20 + rnd(400);
+		testaln			x = make_aln (coreLen, rnd(30), 0.05 + 0.4*rnd01(), 0.25*rnd01(), 1 + rnd(5));
+		unspos			b1 = x.a->beg1, e1 = x.a->end1, b2 = x.a->beg2, e2 = x.a->end2;
+		u64				ct, cq;
+
+		memset (&p, 0, sizeof(p));
+		p.enabled = true;  p.gapOpen = gaps[g][0];  p.gapExtend = gaps[g][1];  p.rightAlign = rnd(2);
+		p.mea = true;  p.meaLambdaScale = scales[rnd(3)];  p.meaTheta = thetas[rnd(3)];
+		realign_aligns (x.target, x.query, sc, x.a, &p);
+		script_lengths (x.a->script, &ct, &cq);
+		check ((x.a->beg1 == b1) && (x.a->end1 == e1) && (x.a->beg2 == b2) && (x.a->end2 == e2),
+		       "MEA realign changed alignment bounds");
+		check ((ct == e1 - b1 + 1) && (cq == e2 - b2 + 1), "MEA new script lengths %" PRIu64 ",%" PRIu64
+		       " vs %u,%u", ct, cq, e1 - b1 + 1, e2 - b2 + 1);
+		check (x.a->s == score_alignment (sc, x.target->v, x.a->beg1-1, x.query->v, x.a->beg2-1, x.a->script),
+		       "MEA alignment score is not score_alignment of the new script");
+		free_aln (&x);
+		}
+	check (realignStats.meaChunks - mea0 == realignStats.numChunks - chunks0, "meaChunks != numChunks");
+	check (realignStats.meaFallback == fb0, "MEA fell back to Viterbi %" PRIu64 " times",
+	       realignStats.meaFallback - fb0);
+	check (realignStats.meaChanged > ch0, "MEA never changed a path");
+	fprintf (stderr, "realign_one_mea: %u alignments, %" PRIu64 " chunks, %" PRIu64 " changed by MEA\n",
+	         rounds, realignStats.meaChunks - mea0, realignStats.meaChanged - ch0);
+	free_score_set ("hoxd55", sets[0]);
+	free_score_set ("hoxd70", sets[1]);
+	}
+
+//----------
+//
 // main
 //
 //----------
@@ -619,6 +906,10 @@ int main (int argc, char** argv)
 	test_widening ();
 	test_ties ();
 	test_realign_one (rounds / 10 + 1);
+	test_mea_vs_enum (rounds / 3 + 1);
+	test_mea_sharp (rounds / 10 + 1);
+	test_mea_ties ();
+	test_realign_one_mea (rounds / 10 + 1);
 
 	fprintf (stderr, "realign_test: %d checks, %d failures\n", numChecks, numFailures);
 	return (numFailures == 0)? 0 : 1;
