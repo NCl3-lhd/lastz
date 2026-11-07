@@ -372,7 +372,20 @@ typedef struct nlstate			// 一个 HSP 的全部 DP 状态
 
 T_solo、T_sec **不与 gappedthresh 挂钩**：没给 `--gappedthresh` 时 lastz 令它等于 hspthresh（`lastz.c:9347`），Human–Mouse 用的又是 lastz 默认参数，两者都是 3000，挂钩等于没设门槛。hspthresh 为自适应（`--hspthresh=top...`）时，J、T_solo 中的 hspthresh 改用本次收集到的最低 HSP 分（与 `finish_one_strand` 里 `lowAnchorScore` 的口径相同）。
 
-**`--inner` 时 gapped 门槛应同时降到 innerThreshold**（例如 `--inner=2000 --gappedthresh=2000`）。插值 HSP 多数是弱片段，gapped 门槛仍为 6000 时大部分被挡掉。simTest 上，在 `--inner=2000` 之外再加 `--gappedthresh=2000`，F_np/F_anc 再升约 0.009，precision 也升，gapped 延伸开销没有增加（`nlchain_progress.md` §12.5）。代码不自动降低门槛：显式给出的 `--gappedthresh` 优先，而 UCSC 式参数总会显式给出它。
+**`--inner` 时 gapped 门槛应同时降到 innerThreshold；nlchain 远缘推荐 `--inner=1000 --gappedthresh=1000`**（2026-11-07）。插值 HSP 多数是弱片段，gapped 门槛仍为 6000 时大部分被挡掉。
+- 在 `--inner=2000` 之外再加 `--gappedthresh=2000`，F_np/F_anc 再升约 0.009，precision 也升，gapped 延伸开销没有增加（`nlchain_progress.md` §12.5）。
+- 在下面这套远缘推荐配置上，把两个门槛从 2000 降到 1000：F_np 0.7613 → 0.7665，F_anc 0.7494 → 0.7558，10/10 对两项都提高，远缘对提高最多（Cow-Rat F_np +0.012）。recall +0.011，precision 不变，CPU 约 +10%。
+- 继续降到 700 或 500，F 最多只多 +0.0002，CPU 却多 10–25%；gapped 门槛低于 1000 不起作用（`docs/box_ceiling_eval.md` §9、§10.2）。
+- 这条推荐只适用于 `--nlchain`。原版（不加 `--nlchain`）的 `--inner` 在全部比对之间插值，没有 1:1 约束，门槛不能低于 2000：即使接上 axtChain/chainNet，1000 门槛的 F_np 也比 2000 门槛低 0.027，lastz CPU 是后者的 27 倍（`docs/box_ceiling_eval.md` §10.3–§10.5）。
+- 代码不自动降低门槛：显式给出的 `--gappedthresh` 优先，而 UCSC 式参数总会显式给出它。
+
+远缘完整推荐配置（HoxD55，UCSC 远缘参数之外再加）：
+
+```
+--nlchain --inner=1000 --gappedthresh=1000 --gap=500,30 --realign=400,8
+```
+
+simTest 10 对平均：F_np 0.7665、F_anc 0.7558。同一数据上，原版 lastz 的最好配置（`--inner=2000 --gappedthresh=2000` 后接 axtChain/chainNet medium/3000）为 F_np 0.7294、F_anc 0.7312。以上数值都在调参集 simTest 上得出，16 个最终测试物种对还没有跑。
 
 **远缘推荐配置还要加 `--gap=500,30 --realign=400,8`**（2026-11-05）：
 - `--gap=500,30` 用于 lastz 自身的 gapped 延伸，simTest 上比 400/30 高 F_np +0.004（`docs/scoring_param_eval.md` §5b）。
@@ -477,3 +490,8 @@ T_solo、T_sec **不与 gappedthresh 挂钩**：没给 `--gappedthresh` 时 last
 
 1. 新增通用选项 `--realign=<O>,<E>[,right|left]`（`src/realign.c`）：输出前对每条比对沿原路径切段、做带约束的单仿射全局比对，只改 edit script。
 2. §8.3 的远缘推荐配置加上 `--gap=500,30 --realign=400,8`。
+
+**2026-11-07，降低插值门槛。** 见 `docs/box_ceiling_eval.md` §9、§10：
+
+1. §8.3 的 nlchain 远缘推荐由 `--inner=2000 --gappedthresh=2000` 改为 `--inner=1000 --gappedthresh=1000`。只改文档推荐，代码默认值不变。
+2. 原版（不加 `--nlchain`）的 `--inner` 门槛不能低于 2000，在 §8.3 中注明。
